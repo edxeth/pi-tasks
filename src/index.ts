@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, truncateToWidth } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { StringEnum, Type } from "@mariozechner/pi-ai";
 import {
   compareTaskIds,
   copyTaskStore,
@@ -170,11 +170,7 @@ const metadataSchema = Type.Record(Type.String(), Type.Any(), {
 
 const taskUpdateFieldsSchema = {
   status: Type.Optional(
-    Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
-      anyOf: [
-        { type: "string", enum: ["pending", "in_progress", "completed"] },
-        { type: "string", const: "deleted" },
-      ],
+    StringEnum(["pending", "in_progress", "completed", "deleted"], {
       description: "New status for the task",
     }),
   ),
@@ -196,9 +192,7 @@ const taskBatchOperationSchema = Type.Union([
     subject: Type.String({ description: "A brief title for the task" }),
     description: Type.String({ description: "A detailed description of what needs to be done" }),
     status: Type.Optional(
-      Type.Unsafe<"pending" | "in_progress" | "completed">({
-        type: "string",
-        enum: ["pending", "in_progress", "completed"],
+      StringEnum(["pending", "in_progress", "completed"], {
         description: "Optional initial status for the new task",
       }),
     ),
@@ -986,9 +980,7 @@ export default function (pi: ExtensionAPI) {
       subject: Type.String({ description: "A brief title for the task" }),
       description: Type.String({ description: "A detailed description of what needs to be done" }),
       status: Type.Optional(
-        Type.Unsafe<"pending" | "in_progress" | "completed">({
-          type: "string",
-          enum: ["pending", "in_progress", "completed"],
+        StringEnum(["pending", "in_progress", "completed"], {
           description: "Optional initial status for the new task",
         }),
       ),
