@@ -29,6 +29,12 @@ afterEach(() => {
 
 function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?: boolean[]; sessionFile?: string; leafId?: string | null }) {
   const widgets = new Map<string, string[] | undefined>();
+  const widgetSetCalls = new Map<string, number>();
+  const widgetComponents = new Map<string, { render?: () => string[]; dispose?: () => void }>();
+  const renderWidget = (key: string) => {
+    const component = widgetComponents.get(key);
+    widgets.set(key, component?.render ? component.render() : undefined);
+  };
   const notifications: Array<{ message: string; level: string }> = [];
   const confirmCalls: Array<{ title: string; message: string }> = [];
   const confirmResponses = [...(options?.confirmResponses ?? [true])];
@@ -36,6 +42,7 @@ function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?
   const ctx: any = {
     hasUI,
     widgets,
+    widgetSetCalls,
     notifications,
     confirmCalls,
     sessionManager: {
@@ -52,8 +59,17 @@ function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?
         return confirmResponses.length > 0 ? confirmResponses.shift() ?? true : true;
       },
       setStatus() {},
-      setWidget(key: string, content: string[] | undefined) {
-        widgets.set(key, content ? [...content] : undefined);
+      setWidget(key: string, content: string[] | ((tui: any, theme: any) => { render?: () => string[]; dispose?: () => void }) | undefined) {
+        widgetSetCalls.set(key, (widgetSetCalls.get(key) ?? 0) + 1);
+        widgetComponents.get(key)?.dispose?.();
+        widgetComponents.delete(key);
+        if (typeof content === "function") {
+          const component = content({ requestRender: () => renderWidget(key) }, ctx.ui.theme);
+          widgetComponents.set(key, component);
+          renderWidget(key);
+        } else {
+          widgets.set(key, content ? [...content] : undefined);
+        }
       },
       theme: {
         fg(_color: string, text: string) {
@@ -622,6 +638,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId, true);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+    expect(ctx.widgetSetCalls.get("tasks")).toBe(1);
 
     await mock.executeTool("task_create", { subject: "Completed blocker", description: "Desc" }, ctx);
     await mock.executeTool("task_create", { subject: "Blocked pending", description: "Desc" }, ctx);
@@ -631,6 +648,7 @@ describe("pi-tasks extension", () => {
     await mock.executeTool("task_update", { taskId: "2", addBlockedBy: ["4", "1"] }, ctx);
     await mock.executeTool("task_update", { taskId: "3", status: "in_progress" }, ctx);
     await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    expect(ctx.widgetSetCalls.get("tasks")).toBe(1);
 
     expect(ctx.widgets.get("tasks")).toEqual([
       "Tasks",
@@ -677,7 +695,7 @@ describe("pi-tasks extension", () => {
     });
 
     await mock.executeShortcut("ctrl+alt+t", ctx);
-    expect(ctx.widgets.get("tasks")).toBeUndefined();
+    expect(ctx.widgets.get("tasks")).toEqual([]);
     expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({
       tasksMode: "hidden",
     });
@@ -686,7 +704,11 @@ describe("pi-tasks extension", () => {
     const remountCtx = mockCtx(sessionId, true);
     initExtension(remount.pi as any);
     await remount.fireLifecycle("session_start", { reason: "startup" }, remountCtx);
-    expect(remountCtx.widgets.get("tasks")).toBeUndefined();
+    expect(remountCtx.widgetSetCalls.get("tasks")).toBe(1);
+    expect(remountCtx.widgets.get("tasks")).toEqual([]);
+    remountCtx.ui.setWidget("later-widget", ["later"]);
+    await remount.executeCommand("tasks", "open", remountCtx);
+    expect([...remountCtx.widgets.keys()]).toEqual(["tasks", "later-widget"]);
 
     await mock.executeCommand("tasks", "open", ctx);
     expect(ctx.widgets.get("tasks")?.[0]).toBe("Tasks");

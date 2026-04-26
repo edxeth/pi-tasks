@@ -543,6 +543,8 @@ export default function (pi: ExtensionAPI) {
   let activeTaskId: string | undefined;
   let widgetCtx: ExtensionContext | undefined;
   let widgetTicker: ReturnType<typeof setInterval> | undefined;
+  let widgetRegistered = false;
+  let widgetTui: { requestRender?: () => void } | undefined;
 
   function stopWidgetTicker() {
     if (!widgetTicker) return;
@@ -750,13 +752,37 @@ export default function (pi: ExtensionAPI) {
     return lines;
   }
 
+  function ensureTaskWidgetRegistered(ctx: ExtensionContext) {
+    if (!ctx.hasUI || widgetRegistered) return;
+
+    ctx.ui.setWidget(TASK_WIDGET_KEY, (tui: { requestRender?: () => void }) => {
+      widgetTui = tui;
+      return {
+        render: () => getTaskWidgetLines(widgetCtx ?? ctx) ?? [],
+        invalidate: () => {},
+        dispose: () => {
+          widgetRegistered = false;
+          widgetTui = undefined;
+        },
+      };
+    });
+    widgetRegistered = true;
+  }
+
   function updateTaskWidget(ctx?: ExtensionContext) {
     if (!ctx?.hasUI) return;
     prepareStore(ctx);
     widgetCtx = ctx;
-    ctx.ui.setWidget(TASK_WIDGET_KEY, getTaskWidgetLines(ctx));
-    if (widgetView === "hidden") stopWidgetTicker();
-    else ensureWidgetTicker();
+
+    ensureTaskWidgetRegistered(ctx);
+    widgetTui?.requestRender?.();
+
+    if (widgetView === "hidden") {
+      stopWidgetTicker();
+      return;
+    }
+
+    ensureWidgetTicker();
   }
 
   function setTaskWidgetView(view: TaskWidgetView) {
@@ -778,6 +804,8 @@ export default function (pi: ExtensionAPI) {
 
   function resetSessionState(ctx: ExtensionContext, options?: { previousSessionFile?: string }) {
     stopWidgetTicker();
+    widgetRegistered = false;
+    widgetTui = undefined;
     currentTurn = 0;
     lastTaskToolUseTurn = 0;
     lastReminderTurn = 0;
@@ -882,6 +910,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     stopWidgetTicker();
+    widgetRegistered = false;
+    widgetTui = undefined;
   });
 
   pi.registerShortcut(TASK_WIDGET_SHORTCUT, {

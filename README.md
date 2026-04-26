@@ -56,6 +56,12 @@ pi install git:github.com/edxeth/pi-tasks
 
 The widget is for interactive sessions. The tools work in any mode.
 
+### Troubleshooting widget order
+
+Pi renders above-editor extension widgets in registration order. `pi-tasks` keeps its initial widget slot stable after startup, but if another above-editor widget appears in the wrong place, check extension load order in `~/.pi/agent/settings.json`.
+
+For example, to render an agent widget above tasks and a status/powerline widget below tasks, load them in that order in the `packages` list.
+
 ## How it behaves
 
 This extension is session-scoped by design. One session gets one task store. That is the point.
