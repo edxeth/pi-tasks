@@ -545,6 +545,7 @@ export default function (pi: ExtensionAPI) {
   let widgetTicker: ReturnType<typeof setInterval> | undefined;
   let widgetRegistered = false;
   let widgetTui: { requestRender?: () => void } | undefined;
+  let widgetSuppressedForInput = false;
 
   function stopWidgetTicker() {
     if (!widgetTicker) return;
@@ -552,10 +553,18 @@ export default function (pi: ExtensionAPI) {
     widgetTicker = undefined;
   }
 
+  function hasVisibleRuntimeTask(): boolean {
+    if (widgetView === "hidden") return false;
+    return store.list().some((todo) => todo.status === "in_progress");
+  }
+
   function ensureWidgetTicker() {
-    if (widgetTicker || !widgetCtx?.hasUI || widgetView === "hidden") return;
+    if (widgetTicker || !widgetCtx?.hasUI || !hasVisibleRuntimeTask()) return;
     widgetTicker = setInterval(() => {
-      if (!widgetCtx?.hasUI || widgetView === "hidden") return;
+      if (!widgetCtx?.hasUI || !hasVisibleRuntimeTask()) {
+        stopWidgetTicker();
+        return;
+      }
       updateTaskWidget(widgetCtx);
     }, WIDGET_REFRESH_INTERVAL_MS);
     widgetTicker.unref?.();
@@ -752,6 +761,14 @@ export default function (pi: ExtensionAPI) {
     return lines.map((line) => truncateToWidth(line, width));
   }
 
+  function clearTaskWidget(ctx?: ExtensionContext) {
+    if (!ctx?.hasUI || !widgetRegistered) return;
+    stopWidgetTicker();
+    ctx.ui.setWidget(TASK_WIDGET_KEY, undefined);
+    widgetRegistered = false;
+    widgetTui = undefined;
+  }
+
   function ensureTaskWidgetRegistered(ctx: ExtensionContext) {
     if (!ctx.hasUI || widgetRegistered) return;
 
@@ -777,7 +794,7 @@ export default function (pi: ExtensionAPI) {
     ensureTaskWidgetRegistered(ctx);
     widgetTui?.requestRender?.();
 
-    if (widgetView === "hidden") {
+    if (!hasVisibleRuntimeTask()) {
       stopWidgetTicker();
       return;
     }
@@ -806,6 +823,7 @@ export default function (pi: ExtensionAPI) {
     stopWidgetTicker();
     widgetRegistered = false;
     widgetTui = undefined;
+    widgetSuppressedForInput = false;
     currentTurn = 0;
     lastTaskToolUseTurn = 0;
     lastReminderTurn = 0;
@@ -814,6 +832,14 @@ export default function (pi: ExtensionAPI) {
     prepareStore(ctx, options);
     updateTaskWidget(ctx);
   }
+
+  pi.on("input", async (_event, ctx) => {
+    prepareStore(ctx);
+    if (!ctx.hasUI || widgetView === "hidden" || !widgetRegistered) return;
+
+    widgetSuppressedForInput = true;
+    clearTaskWidget(ctx);
+  });
 
   pi.on("turn_start", async (_event, ctx) => {
     currentTurn++;
@@ -858,6 +884,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", async (event, ctx) => {
     prepareStore(ctx);
     const message = event.message as { role?: string; usage?: AssistantUsage; customType?: string; details?: unknown };
+
+    if (message.role === "user" && widgetSuppressedForInput) {
+      widgetSuppressedForInput = false;
+      updateTaskWidget(ctx);
+    }
+
     const taskId = resolveActiveTaskId();
     if (!taskId) {
       snapshotStore(ctx);

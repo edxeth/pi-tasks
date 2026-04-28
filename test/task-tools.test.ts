@@ -30,8 +30,10 @@ afterEach(() => {
 function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?: boolean[]; sessionFile?: string; leafId?: string | null }) {
   const widgets = new Map<string, string[] | undefined>();
   const widgetSetCalls = new Map<string, number>();
+  const widgetRenderCalls = new Map<string, number>();
   const widgetComponents = new Map<string, { render?: (width: number) => string[]; dispose?: () => void }>();
   const renderWidget = (key: string, width = 80) => {
+    widgetRenderCalls.set(key, (widgetRenderCalls.get(key) ?? 0) + 1);
     const component = widgetComponents.get(key);
     widgets.set(key, component?.render ? component.render(width) : undefined);
   };
@@ -43,6 +45,7 @@ function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?
     hasUI,
     widgets,
     widgetSetCalls,
+    widgetRenderCalls,
     notifications,
     confirmCalls,
     sessionManager: {
@@ -748,6 +751,71 @@ describe("pi-tasks extension", () => {
     expect(ctx.widgets.get("tasks")?.[2]).toBe("▶ #1 Rename pi-share traces to pi-r2-share · 0s · 1 tool · 2,049 tokens");
 
     cleanupStore(storePath);
+  });
+
+  it("temporarily clears the widget while a user message is submitted", async () => {
+    const sessionId = `todo-widget-input-clear-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+      await mock.executeCommand("tasks", "all", ctx);
+      await mock.executeTool("task_create", { subject: "Done", description: "Desc", status: "completed" }, ctx);
+
+      expect(ctx.widgets.get("tasks")?.join("\n")).toContain("Done");
+      const setCallsBeforeInput = ctx.widgetSetCalls.get("tasks") ?? 0;
+
+      await mock.fireLifecycle("input", { type: "input", text: "next", source: "interactive" }, ctx);
+      expect(ctx.widgets.get("tasks")).toBeUndefined();
+      expect(ctx.widgetSetCalls.get("tasks")).toBe(setCallsBeforeInput + 1);
+
+      await mock.fireLifecycle("message_end", { message: { role: "user", content: [{ type: "text", text: "next" }] } }, ctx);
+      expect(ctx.widgets.get("tasks")?.join("\n")).toContain("Done");
+    } finally {
+      cleanupStore(storePath);
+    }
+  });
+
+  it("only ticks the widget while an in-progress task can change runtime", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-15T12:30:00.000Z"));
+
+    const sessionId = `todo-widget-ticker-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+
+      const startupRenders = ctx.widgetRenderCalls.get("tasks");
+      vi.advanceTimersByTime(3_000);
+      expect(ctx.widgetRenderCalls.get("tasks")).toBe(startupRenders);
+
+      await mock.executeTool("task_create", { subject: "Pending", description: "Desc" }, ctx);
+      const pendingRenders = ctx.widgetRenderCalls.get("tasks");
+      vi.advanceTimersByTime(3_000);
+      expect(ctx.widgetRenderCalls.get("tasks")).toBe(pendingRenders);
+
+      await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
+      const inProgressRenders = ctx.widgetRenderCalls.get("tasks") ?? 0;
+      vi.advanceTimersByTime(1_000);
+      expect(ctx.widgetRenderCalls.get("tasks")).toBe(inProgressRenders + 1);
+
+      await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+      const completedRenders = ctx.widgetRenderCalls.get("tasks");
+      vi.advanceTimersByTime(3_000);
+      expect(ctx.widgetRenderCalls.get("tasks")).toBe(completedRenders);
+    } finally {
+      cleanupStore(storePath);
+      vi.useRealTimers();
+    }
   });
 
   it("updates runtime live and token count after the generation finishes", async () => {
