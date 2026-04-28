@@ -26,6 +26,11 @@ const TASK_WIDGET_SETTINGS_KEY = "tasksMode";
 const TASK_WIDGET_LEGACY_NAMESPACE = "piTasks";
 const TASK_WIDGET_LEGACY_KEY = "widgetView";
 const WIDGET_REFRESH_INTERVAL_MS = 1000;
+const RECENT_COMPLETED_TTL_MS = 30_000;
+const FALLBACK_WIDGET_LINES = 13;
+const MIN_WIDGET_LINES = 5;
+const MAX_WIDGET_LINES = 18;
+const WIDGET_HEIGHT_RATIO = 0.45;
 const DEBUG = !!process.env.PI_TODOS_DEBUG;
 
 type TaskWidgetView = "open" | "all" | "hidden";
@@ -290,6 +295,16 @@ function sortTasksForOpenView(todos: Task[]): Task[] {
     .sort((left, right) => compareTaskIds(left, right));
 }
 
+function compareTaskIdsDescending(left: Task, right: Task): number {
+  return compareTaskIds(right, left);
+}
+
+function isRecentlyCompleted(todo: Task, now = Date.now()): boolean {
+  if (todo.status !== "completed") return false;
+  const completedAt = getTaskStats(todo).completedAt;
+  return typeof completedAt === "number" && now - completedAt < RECENT_COMPLETED_TTL_MS;
+}
+
 function sortTasksForAllView(todos: Task[]): Task[] {
   return [...todos].sort((left, right) => {
     const leftCompleted = left.status === "completed";
@@ -297,6 +312,20 @@ function sortTasksForAllView(todos: Task[]): Task[] {
     if (leftCompleted !== rightCompleted) return leftCompleted ? -1 : 1;
     return compareTaskIds(left, right);
   });
+}
+
+function sortTasksForAllWidgetView(todos: Task[], now = Date.now()): Task[] {
+  return [...todos].sort((left, right) => {
+    const rank = getAllWidgetRank(left, now) - getAllWidgetRank(right, now);
+    return rank !== 0 ? rank : compareTaskIdsDescending(left, right);
+  });
+}
+
+function getAllWidgetRank(todo: Task, now = Date.now()): number {
+  if (todo.status === "in_progress") return 0;
+  if (todo.status === "pending") return 1;
+  if (isRecentlyCompleted(todo, now)) return 2;
+  return 3;
 }
 
 function appendSystemPrompt(base: string | undefined, extra: string): string {
@@ -542,8 +571,14 @@ export default function (pi: ExtensionAPI) {
   let widgetCtx: ExtensionContext | undefined;
   let widgetTicker: ReturnType<typeof setInterval> | undefined;
   let widgetRegistered = false;
-  let widgetTui: { requestRender?: () => void } | undefined;
+  let widgetTui: { requestRender?: () => void; terminal?: { rows?: number } } | undefined;
   let widgetSuppressedForInput = false;
+
+  function getMaxWidgetLines(): number {
+    const terminalRows = widgetTui?.terminal?.rows ?? process.stdout.rows;
+    if (typeof terminalRows !== "number" || !Number.isFinite(terminalRows) || terminalRows <= 0) return FALLBACK_WIDGET_LINES;
+    return Math.max(MIN_WIDGET_LINES, Math.min(MAX_WIDGET_LINES, Math.floor(terminalRows * WIDGET_HEIGHT_RATIO)));
+  }
 
   function stopWidgetTicker() {
     if (!widgetTicker) return;
@@ -731,8 +766,9 @@ export default function (pi: ExtensionAPI) {
 
     widgetCtx = ctx;
     const theme = ctx.ui.theme;
-    const todos = sortTasksForAllView(store.list());
-    const openTodos = sortTasksForOpenView(todos);
+    const storeTodos = store.list();
+    const todos = sortTasksForAllWidgetView(storeTodos);
+    const openTodos = sortTasksForOpenView(storeTodos);
     const completedTodos = todos.filter((todo) => todo.status === "completed");
     const lines: string[] = [];
     const counts = `${openTodos.length} open · ${completedTodos.length} completed · ${todos.length} total`;
@@ -741,10 +777,14 @@ export default function (pi: ExtensionAPI) {
     lines.push(`${theme.fg("muted", counts)}${theme.fg("dim", " · Ctrl+Alt+T to cycle")}`);
 
     const visibleTodos = widgetView === "all" ? todos : openTodos;
+    const maxWidgetLines = getMaxWidgetLines();
+    const maxTaskLines = Math.max(1, maxWidgetLines - lines.length);
+    const taskLineLimit = visibleTodos.length > maxTaskLines ? Math.max(1, maxTaskLines - 1) : maxTaskLines;
+    const displayedTodos = visibleTodos.slice(0, taskLineLimit);
     if (visibleTodos.length === 0) {
       lines.push(theme.fg("dim", widgetView === "all" ? "No tasks yet" : "No open tasks"));
     } else {
-      for (const todo of visibleTodos) {
+      for (const todo of displayedTodos) {
         const iconColor = todo.status === "completed" ? "success" : todo.status === "in_progress" ? "accent" : "dim";
         let line = `${theme.fg(iconColor, getTaskIcon(todo.status))} ${theme.fg("accent", `#${todo.id}`)} ${todo.subject}`;
         const openBlockers = getOpenBlockers(store, todo.blockedBy);
@@ -754,6 +794,8 @@ export default function (pi: ExtensionAPI) {
         if (todo.status === "completed") line = theme.fg("muted", line);
         lines.push(line);
       }
+      const hiddenCount = visibleTodos.length - displayedTodos.length;
+      if (hiddenCount > 0) lines.push(theme.fg("dim", `… ${hiddenCount} more`));
     }
 
     return lines.map((line) => truncateToWidth(line, width));

@@ -27,7 +27,11 @@ afterEach(() => {
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 });
 
-function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?: boolean[]; sessionFile?: string; leafId?: string | null }) {
+function mockCtx(
+  sessionId: string,
+  hasUI = false,
+  options?: { confirmResponses?: boolean[]; sessionFile?: string; leafId?: string | null; terminalRows?: number },
+) {
   const widgets = new Map<string, string[] | undefined>();
   const widgetSetCalls = new Map<string, number>();
   const widgetRenderCalls = new Map<string, number>();
@@ -67,7 +71,7 @@ function mockCtx(sessionId: string, hasUI = false, options?: { confirmResponses?
         widgetComponents.get(key)?.dispose?.();
         widgetComponents.delete(key);
         if (typeof content === "function") {
-          const component = content({ requestRender: () => renderWidget(key) }, ctx.ui.theme);
+          const component = content({ requestRender: () => renderWidget(key), terminal: { rows: options?.terminalRows } }, ctx.ui.theme);
           widgetComponents.set(key, component);
           renderWidget(key);
         } else {
@@ -668,6 +672,90 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
+  it("prioritizes current work first in the All widget view", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-15T14:00:00.000Z"));
+
+    const sessionId = `todo-widget-all-order-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+
+      for (let i = 1; i <= 18; i++) {
+        await mock.executeTool("task_create", { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
+      }
+      vi.advanceTimersByTime(31_000);
+      await mock.executeTool("task_create", { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
+      await mock.executeTool("task_create", { subject: "Next", description: "Desc" }, ctx);
+
+      await mock.executeCommand("tasks", "all", ctx);
+
+      expect(ctx.widgets.get("tasks")).toEqual([
+        "Tasks",
+        "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
+        "▶ #19 Current · 0s",
+        "○ #20 Next",
+        "✓ #18 Old done 18",
+        "✓ #17 Old done 17",
+        "✓ #16 Old done 16",
+        "✓ #15 Old done 15",
+        "✓ #14 Old done 14",
+        "✓ #13 Old done 13",
+        "✓ #12 Old done 12",
+        "✓ #11 Old done 11",
+        "… 10 more",
+      ]);
+    } finally {
+      cleanupStore(storePath);
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses terminal height to cap the All widget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-15T14:30:00.000Z"));
+
+    const sessionId = `todo-widget-height-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true, { terminalRows: 20 });
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+
+      for (let i = 1; i <= 18; i++) {
+        await mock.executeTool("task_create", { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
+      }
+      vi.advanceTimersByTime(31_000);
+      await mock.executeTool("task_create", { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
+      await mock.executeTool("task_create", { subject: "Next", description: "Desc" }, ctx);
+
+      await mock.executeCommand("tasks", "all", ctx);
+
+      expect(ctx.widgets.get("tasks")).toEqual([
+        "Tasks",
+        "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
+        "▶ #19 Current · 0s",
+        "○ #20 Next",
+        "✓ #18 Old done 18",
+        "✓ #17 Old done 17",
+        "✓ #16 Old done 16",
+        "✓ #15 Old done 15",
+        "… 14 more",
+      ]);
+    } finally {
+      cleanupStore(storePath);
+      vi.useRealTimers();
+    }
+  });
+
   it("cycles the widget Open → All → Hidden and restores the last view from settings.json", async () => {
     const sessionId = `todo-widget-cycle-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
@@ -693,8 +781,8 @@ describe("pi-tasks extension", () => {
     expect(ctx.widgets.get("tasks")).toEqual([
       "Tasks",
       "1 open · 1 completed · 2 total · Ctrl+Alt+T to cycle",
-      "✓ #1 Done",
       "○ #2 Open",
+      "✓ #1 Done",
     ]);
     expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({
       tasksMode: "all",
