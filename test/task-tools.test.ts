@@ -13,6 +13,10 @@ function readTaskFile(storePath: string, taskId: string) {
   return JSON.parse(readFileSync(join(storePath, `${taskId}.json`), "utf-8"));
 }
 
+function widgetLines(lines: string[]) {
+  return lines.map((line) => ` ${line}`);
+}
+
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let testAgentDir: string;
 
@@ -246,11 +250,11 @@ describe("pi-tasks extension", () => {
       status: "in_progress",
       metadata: { stats: { startedAt: expect.any(Number) } },
     });
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
       "▶ #1 Ship rename · 0s",
-    ]);
+    ]));
 
     cleanupStore(storePath);
   });
@@ -662,14 +666,14 @@ describe("pi-tasks extension", () => {
     await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
     expect(ctx.widgetSetCalls.get("tasks")).toBe(1);
 
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "4 open · 1 completed · 5 total · Ctrl+Alt+T to cycle",
       "○ #2 Blocked pending [blocked by #4]",
       "▶ #3 In progress · 0s",
       "○ #4 Open blocker",
       "○ #5 Unblocked pending",
-    ]);
+    ]));
 
     cleanupStore(storePath);
   });
@@ -697,7 +701,7 @@ describe("pi-tasks extension", () => {
 
       await mock.executeCommand("tasks", "all", ctx);
 
-      expect(ctx.widgets.get("tasks")).toEqual([
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
         "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
         "▶ #19 Current · 0s",
@@ -711,7 +715,7 @@ describe("pi-tasks extension", () => {
         "✓ #12 Old done 12 · 0s",
         "✓ #11 Old done 11 · 0s",
         "… 10 more",
-      ]);
+      ]));
     } finally {
       cleanupStore(storePath);
       vi.useRealTimers();
@@ -741,7 +745,7 @@ describe("pi-tasks extension", () => {
 
       await mock.executeCommand("tasks", "all", ctx);
 
-      expect(ctx.widgets.get("tasks")).toEqual([
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
         "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
         "▶ #19 Current · 0s",
@@ -751,7 +755,7 @@ describe("pi-tasks extension", () => {
         "✓ #16 Old done 16 · 0s",
         "✓ #15 Old done 15 · 0s",
         "… 14 more",
-      ]);
+      ]));
     } finally {
       cleanupStore(storePath);
       vi.useRealTimers();
@@ -773,19 +777,19 @@ describe("pi-tasks extension", () => {
     await mock.executeTool("task_create", { subject: "Open", description: "Desc" }, ctx);
     await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
 
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "1 open · 1 completed · 2 total · Ctrl+Alt+T to cycle",
       "○ #2 Open",
-    ]);
+    ]));
 
     await mock.executeShortcut("ctrl+alt+t", ctx);
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "1 open · 1 completed · 2 total · Ctrl+Alt+T to cycle",
       "○ #2 Open",
       "✓ #1 Done · 0s",
-    ]);
+    ]));
     expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({
       tasksMode: "all",
     });
@@ -807,13 +811,13 @@ describe("pi-tasks extension", () => {
     expect([...remountCtx.widgets.keys()]).toEqual(["tasks", "later-widget"]);
 
     await mock.executeCommand("tasks", "open", ctx);
-    expect(ctx.widgets.get("tasks")?.[0]).toBe("Tasks");
+    expect(ctx.widgets.get("tasks")?.[0]).toBe(" Tasks");
     expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({
       tasksMode: "open",
     });
 
     await mock.executeCommand("tasks", "all", ctx);
-    expect(ctx.widgets.get("tasks")?.[0]).toBe("Tasks");
+    expect(ctx.widgets.get("tasks")?.[0]).toBe(" Tasks");
 
     cleanupStore(storePath);
   });
@@ -868,7 +872,7 @@ describe("pi-tasks extension", () => {
     ctx.renderWidget("tasks", 76);
 
     expect(ctx.widgets.get("tasks")?.every((line: string) => line.length <= 76)).toBe(true);
-    expect(ctx.widgets.get("tasks")?.[2]).toBe("▶ #1 Rename pi-share traces to pi-r2-share · 0s · 1 tool · 2,049 tokens");
+    expect(ctx.widgets.get("tasks")?.[2]).toBe(" ▶ #1 Rename pi-share traces to pi-r2-share · 0s · 1 tool · 2,049 tokens");
 
     cleanupStore(storePath);
   });
@@ -955,25 +959,25 @@ describe("pi-tasks extension", () => {
       await mock.executeTool("task_create", { subject: "Live", description: "Desc" }, ctx);
       await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
 
-      expect(ctx.widgets.get("tasks")).toEqual([
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
         "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 0s",
-      ]);
+      ]));
 
       vi.advanceTimersByTime(2_000);
-      expect(ctx.widgets.get("tasks")).toEqual([
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
         "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 2s",
-      ]);
+      ]));
 
       await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 18 } } }, ctx);
-      expect(ctx.widgets.get("tasks")).toEqual([
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
         "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 2s · 18 tokens",
-      ]);
+      ]));
     } finally {
       cleanupStore(storePath);
       vi.useRealTimers();
@@ -1010,12 +1014,12 @@ describe("pi-tasks extension", () => {
       "#2 [pending] Open",
       "#3 [pending] Also open",
     ].join("\n"));
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "2 open · 0 completed · 2 total · Ctrl+Alt+T to cycle",
       "○ #2 Open",
       "○ #3 Also open",
-    ]);
+    ]));
 
     cleanupStore(storePath);
   });
@@ -1040,11 +1044,11 @@ describe("pi-tasks extension", () => {
 
     expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe("#1 [completed] Done · 0s");
     expect(existsSync(join(storePath, "1.json"))).toBe(true);
-    expect(ctx.widgets.get("tasks")).toEqual([
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
       "0 open · 1 completed · 1 total · Ctrl+Alt+T to cycle",
       "No open tasks",
-    ]);
+    ]));
 
     cleanupStore(storePath);
   });

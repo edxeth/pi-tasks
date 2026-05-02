@@ -31,6 +31,7 @@ const FALLBACK_WIDGET_LINES = 13;
 const MIN_WIDGET_LINES = 5;
 const MAX_WIDGET_LINES = 18;
 const WIDGET_HEIGHT_RATIO = 0.45;
+const WIDGET_HORIZONTAL_PADDING = 1;
 const DEBUG = !!process.env.PI_TODOS_DEBUG;
 
 type TaskWidgetView = "open" | "all" | "hidden";
@@ -799,7 +800,10 @@ export default function (pi: ExtensionAPI) {
       if (hiddenCount > 0) lines.push(theme.fg("dim", `… ${hiddenCount} more`));
     }
 
-    return lines.map((line) => truncateToWidth(line, width));
+    const leftPadding = " ".repeat(Math.min(WIDGET_HORIZONTAL_PADDING, width));
+    const contentWidth = Math.max(0, width - leftPadding.length);
+
+    return lines.map((line) => `${leftPadding}${truncateToWidth(line, contentWidth)}`);
   }
 
   function ensureTaskWidgetRegistered(ctx: ExtensionContext) {
