@@ -1,5 +1,14 @@
 # pi-tasks
 
+## 🌐 **Join the Community**
+
+> [!NOTE]
+> **Building with AI doesn’t have to be a solo grind.**  
+> Join our Discord community to meet other people exploring the latest models, tools, workflows, and ideas: **https://discord.gg/whhrDtCrSS**
+>
+> We talk about what’s new, what’s useful, and what’s actually worth paying attention to in AI.  
+> *And if you want more than conversation,* members also get access to **heavily discounted AI products and services** — including deals on tools like **ChatGPT Plus** and more for just a few dollars.
+
 `pi-tasks` gives [pi](https://github.com/badlogic/pi-mono) a real task system.
 
 It started from `tintinweb/pi-tasks`, took heavy inspiration from Claude Code's task model, and was reworked by [`me`](https://github.com/edxeth) to push toward Claude Code parity where pi can support it cleanly.
