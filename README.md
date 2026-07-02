@@ -47,6 +47,76 @@ https://github.com/user-attachments/assets/f0229862-417b-4ef2-9486-2b8736b7ce87
 pi install git:github.com/edxeth/pi-tasks
 ```
 
+## Plan compatibility mode
+
+`pi-tasks` supports an optional `update_plan` compatibility mode for clients that render plan/task UIs when they see a tool named `update_plan`. This mode is opt-in and does not change the default behavior.
+
+### Modes
+
+Set the `PI_TASKS_MODE` environment variable to choose a mode:
+
+- `classic` (default): Exposes the five standard tools (`task_create`, `task_update`, `task_batch`, `task_list`, `task_get`). This is the default and recommended mode for most users.
+- `plan`: Exposes only `update_plan` for mutations plus `task_list` and `task_get` for inspection. Use this when your client renders `update_plan` as a plan UI and you want to stay synchronized.
+- `dual`: Exposes all tools including both classic mutation tools and `update_plan`. Useful for experimentation and transition, but external plan UIs only stay synchronized when the model chooses `update_plan` for writes.
+- `auto`: Uses `plan` when Pi is launched with Paseo runtime signals (`PASEO_AGENT_ID` or `PASEO_LISTEN`); otherwise uses `classic`.
+
+### Using plan mode
+
+```bash
+export PI_TASKS_MODE=plan
+pi
+```
+
+To opt into automatic Paseo detection while keeping normal Pi sessions classic:
+
+```bash
+export PI_TASKS_MODE=auto
+pi
+```
+
+In plan mode, use `update_plan` for all task mutations:
+
+```text
+update_plan({
+  "plan": [
+    { "step": "Implement feature X", "status": "pending" },
+    { "step": "Write tests for feature X", "status": "in_progress" }
+  ]
+})
+```
+
+### Richer updates with operations
+
+For exact control over task IDs, dependencies, metadata, and deletes, include the optional `operations` field:
+
+```text
+update_plan({
+  "plan": [
+    { "step": "Task 1", "status": "completed" },
+    { "step": "Task 2", "status": "in_progress", "taskId": "5" }
+  ],
+  "operations": [
+    { "type": "update", "taskId": "5", "status": "in_progress", "addBlockedBy": ["1"] }
+  ]
+})
+```
+
+### Plan reconciliation
+
+After applying any valid `operations`, `update_plan` reconciles the task store back to the submitted plan. When `operations` are not provided or fail, reconciliation still runs from the plan alone:
+
+- The `plan` field is treated as the complete visible task list after the call
+- Plan entries match existing tasks by `taskId` first, then by subject
+- Tasks not in the submitted plan are removed from the visible active plan
+- Empty/whitespace-only steps are filtered out
+
+### Trade-offs
+
+- **Classic mode**: Best for general use. Full tool surface, no external dependencies.
+- **Plan mode**: Best for clients that render `update_plan` specially. Single mutation tool keeps external UIs synchronized. Plan-only reconciliation works even when callers don't know task IDs.
+- **Dual mode**: Useful for debugging and transition. Does not guarantee external plan UI synchronization if the model chooses classic mutation tools.
+- **Auto mode**: Best if you run the same installation both directly and through a plan-rendering client. It only switches to plan mode when known runtime signals are present.
+
 ## The surface
 
 ### Tools

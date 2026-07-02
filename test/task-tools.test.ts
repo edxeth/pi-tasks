@@ -178,8 +178,9 @@ function mockPi() {
 }
 
 describe("pi-tasks extension", () => {
-  it("registers only task tools plus the task widget commands", () => {
+  it("registers only task tools plus the task widget commands in classic mode", () => {
     const mock = mockPi();
+    delete process.env.PI_TASKS_MODE;
     initExtension(mock.pi as any);
 
     expect([...mock.tools.keys()].sort()).toEqual([
@@ -190,6 +191,83 @@ describe("pi-tasks extension", () => {
       "task_update",
     ]);
     expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clear-completed"]);
+  });
+
+  it("registers update_plan and read tools in plan mode", () => {
+    const mock = mockPi();
+    process.env.PI_TASKS_MODE = "plan";
+    initExtension(mock.pi as any);
+    delete process.env.PI_TASKS_MODE;
+
+    expect([...mock.tools.keys()].sort()).toEqual([
+      "task_get",
+      "task_list",
+      "update_plan",
+    ]);
+    expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clear-completed"]);
+  });
+
+  it("registers all tools including update_plan in dual mode", () => {
+    const mock = mockPi();
+    process.env.PI_TASKS_MODE = "dual";
+    initExtension(mock.pi as any);
+    delete process.env.PI_TASKS_MODE;
+
+    expect([...mock.tools.keys()].sort()).toEqual([
+      "task_batch",
+      "task_create",
+      "task_get",
+      "task_list",
+      "task_update",
+      "update_plan",
+    ]);
+    expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clear-completed"]);
+  });
+
+  it("resolves auto mode to classic without Paseo signals", () => {
+    const mock = mockPi();
+    process.env.PI_TASKS_MODE = "auto";
+    const originalPaseoAgentId = process.env.PASEO_AGENT_ID;
+    const originalPaseoListen = process.env.PASEO_LISTEN;
+    delete process.env.PASEO_AGENT_ID;
+    delete process.env.PASEO_LISTEN;
+    try {
+      initExtension(mock.pi as any);
+    } finally {
+      delete process.env.PI_TASKS_MODE;
+      if (originalPaseoAgentId === undefined) delete process.env.PASEO_AGENT_ID;
+      else process.env.PASEO_AGENT_ID = originalPaseoAgentId;
+      if (originalPaseoListen === undefined) delete process.env.PASEO_LISTEN;
+      else process.env.PASEO_LISTEN = originalPaseoListen;
+    }
+
+    expect([...mock.tools.keys()].sort()).toEqual([
+      "task_batch",
+      "task_create",
+      "task_get",
+      "task_list",
+      "task_update",
+    ]);
+  });
+
+  it("resolves auto mode to plan with Paseo signals", () => {
+    const mock = mockPi();
+    process.env.PI_TASKS_MODE = "auto";
+    const originalPaseoAgentId = process.env.PASEO_AGENT_ID;
+    process.env.PASEO_AGENT_ID = "test-paseo-agent";
+    try {
+      initExtension(mock.pi as any);
+    } finally {
+      delete process.env.PI_TASKS_MODE;
+      if (originalPaseoAgentId === undefined) delete process.env.PASEO_AGENT_ID;
+      else process.env.PASEO_AGENT_ID = originalPaseoAgentId;
+    }
+
+    expect([...mock.tools.keys()].sort()).toEqual([
+      "task_get",
+      "task_list",
+      "update_plan",
+    ]);
   });
 
   it("injects a hidden task workflow policy into the system prompt", async () => {
@@ -209,6 +287,30 @@ describe("pi-tasks extension", () => {
     expect(result.systemPrompt).toContain("Use task_update for ordinary single-task changes");
     expect(result.systemPrompt).toContain("Use task_batch when creating 2 or more tasks in one turn");
     expect(result.systemPrompt).toContain("Subagents may help execute work");
+
+    cleanupStore(storePath);
+  });
+
+  it("injects plan-mode policy in plan mode", async () => {
+    const sessionId = `task-policy-plan-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    process.env.PI_TASKS_MODE = "plan";
+    initExtension(mock.pi as any);
+    delete process.env.PI_TASKS_MODE;
+    await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
+
+    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
+    expect(result.systemPrompt).toContain("Base prompt");
+    expect(result.systemPrompt).toContain("Task workflow guidance:");
+    expect(result.systemPrompt).toContain("Use update_plan");
+    expect(result.systemPrompt).toContain("Always send the complete visible plan");
+    expect(result.systemPrompt).not.toContain("Use task_create");
+    expect(result.systemPrompt).not.toContain("Use task_update");
+    expect(result.systemPrompt).not.toContain("Use task_batch");
 
     cleanupStore(storePath);
   });
@@ -1145,5 +1247,262 @@ describe("pi-tasks extension", () => {
     expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe("#1 [completed] Done · 0s");
 
     cleanupStore(storePath);
+  });
+
+  describe("update_plan in plan mode", () => {
+    beforeEach(() => {
+      process.env.PI_TASKS_MODE = "plan";
+    });
+
+    afterEach(() => {
+      delete process.env.PI_TASKS_MODE;
+    });
+
+    it("creates tasks from plan-only call", async () => {
+      const sessionId = `update-plan-create-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+      const result = await mock.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "First task", status: "pending" },
+            { step: "Second task", status: "in_progress" },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock.executeTool("task_list", {}, ctx);
+      expect(tasks.content[0].text).toContain("#1 [pending] First task");
+      expect(tasks.content[0].text).toContain("#2 [in_progress] Second task");
+
+      cleanupStore(storePath);
+    });
+
+    it("updates existing tasks by subject match", async () => {
+      const sessionId = `update-plan-update-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      process.env.PI_TASKS_MODE = "classic";
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+      await mock.executeTool("task_create", { subject: "First task", description: "Original description" }, ctx);
+      delete process.env.PI_TASKS_MODE;
+
+      // Re-init in plan mode
+      const mock2 = mockPi();
+      process.env.PI_TASKS_MODE = "plan";
+      initExtension(mock2.pi as any);
+      await mock2.fireLifecycle("before_agent_start", {}, ctx);
+
+      const result = await mock2.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "First task", status: "completed" },
+            { step: "New task", status: "pending" },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock2.executeTool("task_list", {}, ctx);
+      expect(tasks.content[0].text).toContain("#1 [completed] First task");
+      expect(tasks.content[0].text).toContain("#2 [pending] New task");
+
+      cleanupStore(storePath);
+    });
+
+    it("deletes tasks not in the submitted plan", async () => {
+      const sessionId = `update-plan-delete-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      process.env.PI_TASKS_MODE = "classic";
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+      await mock.executeTool("task_create", { subject: "Task 1", description: "Desc" }, ctx);
+      await mock.executeTool("task_create", { subject: "Task 2", description: "Desc" }, ctx);
+      await mock.executeTool("task_create", { subject: "Task 3", description: "Desc" }, ctx);
+      delete process.env.PI_TASKS_MODE;
+
+      const mock2 = mockPi();
+      process.env.PI_TASKS_MODE = "plan";
+      initExtension(mock2.pi as any);
+      await mock2.fireLifecycle("before_agent_start", {}, ctx);
+
+      const result = await mock2.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "Task 2", status: "in_progress" },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock2.executeTool("task_list", {}, ctx);
+      expect(tasks.content[0].text).not.toContain("Task 1");
+      expect(tasks.content[0].text).toContain("#2 [in_progress] Task 2");
+      expect(tasks.content[0].text).not.toContain("Task 3");
+
+      cleanupStore(storePath);
+    });
+
+    it("filters out empty/whitespace-only steps", async () => {
+      const sessionId = `update-plan-filter-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+      const result = await mock.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "Valid task", status: "pending" },
+            { step: "   ", status: "pending" },
+            { step: "", status: "pending" },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock.executeTool("task_list", {}, ctx);
+      expect(tasks.content[0].text).toContain("Valid task");
+      // Should only have one task, not three
+      const lines = tasks.content[0].text.split("\n");
+      expect(lines.filter((line: string) => line.includes("#")).length).toBe(1);
+
+      cleanupStore(storePath);
+    });
+
+    it("applies operations first, then reconciles to match the submitted plan", async () => {
+      const sessionId = `update-plan-ops-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+      // Operations create a task, then reconciliation converges to the submitted plan
+      const result = await mock.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "First task", status: "pending" },
+            { step: "Second task", status: "in_progress" },
+          ],
+          operations: [
+            {
+              type: "create",
+              subject: "Explicit task",
+              description: "From operations",
+              status: "pending",
+            },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock.executeTool("task_list", {}, ctx);
+      // Reconciliation converges to the submitted plan, overriding operations
+      expect(tasks.content[0].text).toContain("First task");
+      expect(tasks.content[0].text).toContain("Second task");
+      expect(tasks.content[0].text).not.toContain("Explicit task");
+
+      cleanupStore(storePath);
+    });
+
+    it("falls back to plan reconciliation when operations fail", async () => {
+      const sessionId = `update-plan-fallback-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+      // Provide invalid operation that will fail
+      const result = await mock.executeTool(
+        "update_plan",
+        {
+          plan: [
+            { step: "Plan task", status: "pending" },
+          ],
+          operations: [
+            {
+              type: "update",
+              taskId: "999", // Non-existent task
+              status: "completed",
+            },
+          ],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      expect(result.content[0].text).toContain("warning");
+      const tasks = await mock.executeTool("task_list", {}, ctx);
+      // Should have fallen back to plan reconciliation
+      expect(tasks.content[0].text).toContain("Plan task");
+
+      cleanupStore(storePath);
+    });
+
+    it("clears plan with empty plan array", async () => {
+      const sessionId = `update-plan-clear-${Date.now()}`;
+      const storePath = getSessionTaskDirPath(sessionId);
+      cleanupStore(storePath);
+
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("before_agent_start", {}, ctx);
+      await mock.executeTool(
+        "update_plan",
+        {
+          plan: [{ step: "Task to clear", status: "pending" }],
+        },
+        ctx,
+      );
+
+      const result = await mock.executeTool(
+        "update_plan",
+        {
+          plan: [],
+        },
+        ctx,
+      );
+
+      expect(result.content[0].text).toContain("Plan updated");
+      const tasks = await mock.executeTool("task_list", {}, ctx);
+      expect(tasks.content[0].text).toBe("No tasks found");
+
+      cleanupStore(storePath);
+    });
   });
 });

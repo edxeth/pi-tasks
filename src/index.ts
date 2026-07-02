@@ -16,8 +16,37 @@ import {
 } from "./task-store.js";
 import type { Task } from "./task-types.js";
 
-const TASK_MANAGEMENT_TOOL_NAMES = new Set(["task_create", "task_update", "task_batch"]);
-const TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAMES, "task_list", "task_get"]);
+type TaskMode = "classic" | "plan" | "dual";
+
+let TASK_MODE: TaskMode = "classic";
+let TASK_MANAGEMENT_TOOL_NAMES: Set<string> = new Set(["task_create", "task_update", "task_batch"]);
+let TASK_TELEMETRY_EXCLUDED_TOOL_NAMES: Set<string> = new Set(["task_create", "task_update", "task_batch", "task_list", "task_get"]);
+
+function isPaseoRuntime(): boolean {
+  return !!(process.env.PASEO_AGENT_ID || process.env.PASEO_LISTEN);
+}
+
+function resolveTaskMode(): TaskMode {
+  const modeEnv = process.env.PI_TASKS_MODE?.toLowerCase();
+  if (modeEnv === "plan") return "plan";
+  if (modeEnv === "dual") return "dual";
+  if (modeEnv === "classic") return "classic";
+  if (modeEnv === "auto") return isPaseoRuntime() ? "plan" : "classic";
+  return "classic";
+}
+
+function updateTaskMode(mode: TaskMode) {
+  TASK_MODE = mode;
+  const baseNames = ["task_create", "task_update", "task_batch"];
+  if (mode === "plan") {
+    TASK_MANAGEMENT_TOOL_NAMES = new Set(["update_plan"]);
+  } else if (mode === "dual") {
+    TASK_MANAGEMENT_TOOL_NAMES = new Set([...baseNames, "update_plan"]);
+  } else {
+    TASK_MANAGEMENT_TOOL_NAMES = new Set(baseNames);
+  }
+  TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAMES, "task_list", "task_get"]);
+}
 const TASK_WIDGET_KEY = "tasks";
 const TASK_WIDGET_SHORTCUT = Key.ctrlAlt("t");
 const REMINDER_INTERVAL = 10;
@@ -79,21 +108,50 @@ type TaskBatchOperation =
       taskId: string;
     };
 
-const TASK_SYSTEM_POLICY = [
-  "Task workflow guidance:",
-  "- Use the task tools when the work is non-trivial, multi-step, or clearly benefits from persistence across turns.",
-  "- Skip task tools for a simple one-off job or purely conversational replies.",
-  "- Capture or revise the task list early once the work has become multi-step or the context is growing.",
-  "- Mark a task in_progress before substantial work starts.",
-  "- Mark a task completed only when the work is fully done; if it is partial, blocked, or failing verification, leave it pending or in_progress.",
-  "- Use task_get to refresh stale details before updating a task whose latest state may have changed.",
-  "- After completing a task, call task_list to choose the next ready item. Prefer lower task IDs when multiple tasks are equally ready.",
-  "- Use task_create for a new task only when the work is worth tracking, or when later work depends on the ID of this creation.",
-  "- Use task_update for ordinary single-task changes.",
-  "- Use task_batch when creating 2 or more tasks in one turn or when several task mutations should commit together without intermediate reads.",
-  "- Parallel task tool calls are fine for independent reads, but shared task-list writes should usually stay in one task_batch call instead of parallel task_update calls.",
-  "- Subagents may help execute work, but keep the canonical session task list coherent; the parent agent should usually own shared task updates.",
-].join("\n");
+function getTaskSystemPolicy(): string {
+  const baseGuidance = [
+    "Task workflow guidance:",
+    "- Use the task tools when the work is non-trivial, multi-step, or clearly benefits from persistence across turns.",
+    "- Skip task tools for a simple one-off job or purely conversational replies.",
+    "- Capture or revise the task list early once the work has become multi-step or the context is growing.",
+    "- Mark a task in_progress before substantial work starts.",
+    "- Mark a task completed only when the work is fully done; if it is partial, blocked, or failing verification, leave it pending or in_progress.",
+    "- Use task_get to refresh stale details before updating a task whose latest state may have changed.",
+    "- After completing a task, call task_list to choose the next ready item. Prefer lower task IDs when multiple tasks are equally ready.",
+    "- Subagents may help execute work, but keep the canonical session task list coherent; the parent agent should usually own shared task updates.",
+  ];
+
+  if (TASK_MODE === "plan") {
+    return [
+      ...baseGuidance,
+      "- Use update_plan for all task mutations including creates, updates, and deletes.",
+      "- Always send the complete visible plan in the plan field after the change.",
+      "- Use operations for exact task IDs, dependencies, metadata, and deletes when known.",
+      "- Use task_list and task_get for inspection only.",
+    ].join("\n");
+  }
+
+  if (TASK_MODE === "dual") {
+    return [
+      ...baseGuidance,
+      "- You may use either update_plan or the classic task tools (task_create, task_update, task_batch) for mutations.",
+      "- For external plan UI synchronization, prefer update_plan when available.",
+      "- If using update_plan, always send the complete visible plan in the plan field after the change.",
+      "- Use task_create for a new task only when the work is worth tracking, or when later work depends on the ID of this creation.",
+      "- Use task_update for ordinary single-task changes.",
+      "- Use task_batch when creating 2 or more tasks in one turn or when several task mutations should commit together without intermediate reads.",
+      "- Parallel task tool calls are fine for independent reads, but shared task-list writes should usually stay in one task_batch call instead of parallel task_update calls.",
+    ].join("\n");
+  }
+
+  return [
+    ...baseGuidance,
+    "- Use task_create for a new task only when the work is worth tracking, or when later work depends on the ID of this creation.",
+    "- Use task_update for ordinary single-task changes.",
+    "- Use task_batch when creating 2 or more tasks in one turn or when several task mutations should commit together without intermediate reads.",
+    "- Parallel task tool calls are fine for independent reads, but shared task-list writes should usually stay in one task_batch call instead of parallel task_update calls.",
+  ].join("\n");
+}
 
 const TASK_CREATE_DESCRIPTION = `Use this tool to create one structured task for the current coding session.
 
@@ -125,6 +183,18 @@ Only mark a task \`completed\` when the work is fully done. If work is partial, 
 const TASK_BATCH_DESCRIPTION = `Apply multiple task create, update, and delete operations atomically through the canonical task store.
 
 Use this for batched task changes, including creating 2 or more tasks in one turn when you do not need intermediate reads. For ordinary single-task changes, prefer \`task_create\` or \`task_update\`. Either the full operation list commits, or none of it does.`;
+
+const UPDATE_PLAN_DESCRIPTION = `Update the visible task plan and optionally provide structured operations for exact task-store updates.
+
+Always send the complete visible plan in the plan field after the change. Use operations for exact task IDs, dependencies, metadata, and deletes when known. The plan field is the complete client-visible task list after the call.`;
+
+const UPDATE_PLAN_GUIDELINES = [
+  "Always send the complete visible plan in the plan field after the change.",
+  "Use operations for exact task IDs, dependencies, metadata, and deletes when known.",
+  "Plan entries without taskId will be matched by subject to existing tasks when possible.",
+  "Tasks not represented in the submitted complete plan are removed from the visible active plan.",
+  "Use task_list and task_get for inspection only.",
+];
 
 const TASK_CREATE_GUIDELINES = [
   "Capture new multi-step requirements early and keep the session task list current.",
@@ -159,11 +229,35 @@ const TASK_BATCH_GUIDELINES = [
   "Use task_create or task_update for one-off mutations, or when you need intermediate reads between steps.",
 ];
 
-const SYSTEM_REMINDER_PREFIX = [
-  "<system-reminder>",
-  "The task tools haven't been used recently. If relevant, use task_create when the work is worth tracking, task_update for one existing task, and task_batch for 2 or more task writes in one turn when intermediate reads are unnecessary.",
-  "Open tasks:",
-] as const;
+function getSystemReminderPrefix(): readonly string[] {
+  const base = [
+    "<system-reminder>",
+    "The task tools haven't been used recently.",
+  ];
+
+  if (TASK_MODE === "plan") {
+    return [
+      ...base,
+      "If relevant, use update_plan for task mutations.",
+      "Open tasks:",
+    ];
+  }
+
+  if (TASK_MODE === "dual") {
+    return [
+      ...base,
+      "If relevant, use update_plan or task_create/task_update/task_batch for task mutations.",
+      "Open tasks:",
+    ];
+  }
+
+  return [
+    ...base,
+    "If relevant, use task_create when the work is worth tracking, task_update for one existing task, and task_batch for 2 or more task writes in one turn when intermediate reads are unnecessary.",
+    "Open tasks:",
+  ];
+}
+
 const SYSTEM_REMINDER_SUFFIX = [
   "Only open tasks are listed here. This reminder is read-only; ignore it if not applicable.",
   "Make sure that you NEVER mention this reminder to the user",
@@ -222,6 +316,24 @@ const taskBatchOperationSchema = Type.Union([
   }),
 ]);
 
+const planEntrySchema = Type.Object({
+  step: Type.String({ description: "The step text or subject for the plan entry" }),
+  status: Type.Unsafe<"pending" | "in_progress" | "completed">({
+    type: "string",
+    enum: ["pending", "in_progress", "completed"],
+    description: "The status of the plan entry",
+  }),
+  taskId: Type.Optional(Type.String({ description: "Optional task ID for exact matching with existing tasks" })),
+  description: Type.Optional(Type.String({ description: "Optional detailed description for the plan entry" })),
+  activeForm: Type.Optional(Type.String({ description: "Optional present continuous form shown while in_progress" })),
+  metadata: Type.Optional(metadataSchema),
+});
+
+const updatePlanParametersSchema = Type.Object({
+  plan: Type.Array(planEntrySchema, { description: "The complete visible plan after the change" }),
+  operations: Type.Optional(Type.Array(taskBatchOperationSchema, { description: "Optional structured operations for exact task-store updates" })),
+});
+
 function debug(...args: unknown[]) {
   if (DEBUG) console.error("[pi-tasks]", ...args);
 }
@@ -279,7 +391,7 @@ function formatReminderTaskLine(todo: Task, store: TaskStore): string {
 function getSystemReminder(store: TaskStore): string | undefined {
   const openTasks = store.list().filter((todo) => todo.status !== "completed");
   if (openTasks.length === 0) return undefined;
-  return [...SYSTEM_REMINDER_PREFIX, ...openTasks.map((todo) => formatReminderTaskLine(todo, store)), ...SYSTEM_REMINDER_SUFFIX].join(
+  return [...getSystemReminderPrefix(), ...openTasks.map((todo) => formatReminderTaskLine(todo, store)), ...SYSTEM_REMINDER_SUFFIX].join(
     "\n",
   );
 }
@@ -561,6 +673,7 @@ function chooseMostRecentInProgressTask(todos: Task[]): Task | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+  updateTaskMode(resolveTaskMode());
   let store = new TaskStore();
   let storeScopeKey: string | undefined;
   let storeLeafId: string | null | undefined;
@@ -886,7 +999,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     prepareStore(ctx);
     return {
-      systemPrompt: appendSystemPrompt((event as { systemPrompt?: string }).systemPrompt, TASK_SYSTEM_POLICY),
+      systemPrompt: appendSystemPrompt((event as { systemPrompt?: string }).systemPrompt, getTaskSystemPolicy()),
     };
   });
 
@@ -1068,33 +1181,35 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  pi.registerTool({
-    name: "task_create",
-    label: "task_create",
-    description: TASK_CREATE_DESCRIPTION,
-    promptGuidelines: TASK_CREATE_GUIDELINES,
-    parameters: Type.Object({
-      subject: Type.String({ description: "A brief title for the task" }),
-      description: Type.String({ description: "A detailed description of what needs to be done" }),
-      status: Type.Optional(
-        Type.Unsafe<"pending" | "in_progress" | "completed">({
-          type: "string",
-          enum: ["pending", "in_progress", "completed"],
-          description: "Optional initial status for the new task",
-        }),
-      ),
-      activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
-      metadata: Type.Optional(metadataSchema),
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const fields = prepareCreateFields(params);
-      const todo = store.create(fields.subject, fields.description, fields.status, fields.activeForm, fields.metadata);
-      if (todo.status === "in_progress") activeTaskId = todo.id;
-      updateTaskWidget(ctx);
-      return Promise.resolve(textResult(`Task #${todo.id} created successfully: ${todo.subject}`));
-    },
-  });
+  if (TASK_MODE === "classic" || TASK_MODE === "dual") {
+    pi.registerTool({
+      name: "task_create",
+      label: "task_create",
+      description: TASK_CREATE_DESCRIPTION,
+      promptGuidelines: TASK_CREATE_GUIDELINES,
+      parameters: Type.Object({
+        subject: Type.String({ description: "A brief title for the task" }),
+        description: Type.String({ description: "A detailed description of what needs to be done" }),
+        status: Type.Optional(
+          Type.Unsafe<"pending" | "in_progress" | "completed">({
+            type: "string",
+            enum: ["pending", "in_progress", "completed"],
+            description: "Optional initial status for the new task",
+          }),
+        ),
+        activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
+        metadata: Type.Optional(metadataSchema),
+      }),
+      execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        prepareStore(ctx);
+        const fields = prepareCreateFields(params);
+        const todo = store.create(fields.subject, fields.description, fields.status, fields.activeForm, fields.metadata);
+        if (todo.status === "in_progress") activeTaskId = todo.id;
+        updateTaskWidget(ctx);
+        return Promise.resolve(textResult(`Task #${todo.id} created successfully: ${todo.subject}`));
+      },
+    });
+  }
 
   pi.registerTool({
     name: "task_list",
@@ -1126,62 +1241,208 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "task_update",
-    label: "task_update",
-    description: TASK_UPDATE_DESCRIPTION,
-    promptGuidelines: TASK_UPDATE_GUIDELINES,
-    parameters: Type.Object({
-      taskId: Type.String({ description: "The ID of the task to update" }),
-      ...taskUpdateFieldsSchema,
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const { taskId, ...rawFields } = params;
-      const fields = prepareTaskUpdate(taskId, rawFields);
-      const { todo, changedFields, warnings } = store.update(taskId, fields);
-      if (changedFields.length === 0 && !todo) return Promise.resolve(textResult(`Task #${taskId} not found`));
-      const visibleChangedFields = normalizeChangedFields(changedFields, rawFields.metadata !== undefined);
-      if (fields.status === "in_progress") activeTaskId = taskId;
-      if ((fields.status === "completed" || fields.status === "deleted") && activeTaskId === taskId) activeTaskId = undefined;
-      if (fields.status === "deleted") {
-        store.deleteFileIfEmpty();
-      }
-      updateTaskWidget(ctx);
-      return Promise.resolve(textResult(formatUpdateMessage(taskId, visibleChangedFields, warnings)));
-    },
-  });
+  if (TASK_MODE === "classic" || TASK_MODE === "dual") {
+    pi.registerTool({
+      name: "task_update",
+      label: "task_update",
+      description: TASK_UPDATE_DESCRIPTION,
+      promptGuidelines: TASK_UPDATE_GUIDELINES,
+      parameters: Type.Object({
+        taskId: Type.String({ description: "The ID of the task to update" }),
+        ...taskUpdateFieldsSchema,
+      }),
+      execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        prepareStore(ctx);
+        const { taskId, ...rawFields } = params;
+        const fields = prepareTaskUpdate(taskId, rawFields);
+        const { todo, changedFields, warnings } = store.update(taskId, fields);
+        if (changedFields.length === 0 && !todo) return Promise.resolve(textResult(`Task #${taskId} not found`));
+        const visibleChangedFields = normalizeChangedFields(changedFields, rawFields.metadata !== undefined);
+        if (fields.status === "in_progress") activeTaskId = taskId;
+        if ((fields.status === "completed" || fields.status === "deleted") && activeTaskId === taskId) activeTaskId = undefined;
+        if (fields.status === "deleted") {
+          store.deleteFileIfEmpty();
+        }
+        updateTaskWidget(ctx);
+        return Promise.resolve(textResult(formatUpdateMessage(taskId, visibleChangedFields, warnings)));
+      },
+    });
+  }
 
-  pi.registerTool({
-    name: "task_batch",
-    label: "task_batch",
-    description: TASK_BATCH_DESCRIPTION,
-    promptGuidelines: TASK_BATCH_GUIDELINES,
-    parameters: Type.Object({
-      operations: Type.Array(taskBatchOperationSchema, { description: "Ordered task operations to apply atomically" }),
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const operations = prepareBatchOperations(params.operations as TaskBatchOperation[]);
-      const result = store.write(operations as any);
-      if (!result.committed) return Promise.resolve(textResult(formatTaskBatchMessage(result)));
-      const visibleResult: TaskBatchResult = {
-        ...result,
-        operations: result.operations.map((operation) => {
-          if (operation.type !== "update") return operation;
-          const originalOperation = params.operations[operation.index - 1] as TaskBatchOperation | undefined;
-          return {
-            ...operation,
-            changedFields: normalizeChangedFields(operation.changedFields, !!originalOperation && originalOperation.type === "update" && originalOperation.metadata !== undefined),
-          };
-        }),
-      };
-      applyPostWriteTracking(operations);
-      if (operations.some((operation) => operation.type === "delete")) {
-        store.deleteFileIfEmpty();
-      }
-      updateTaskWidget(ctx);
-      return Promise.resolve(textResult(formatTaskBatchMessage(visibleResult)));
-    },
-  });
+  if (TASK_MODE === "classic" || TASK_MODE === "dual") {
+    pi.registerTool({
+      name: "task_batch",
+      label: "task_batch",
+      description: TASK_BATCH_DESCRIPTION,
+      promptGuidelines: TASK_BATCH_GUIDELINES,
+      parameters: Type.Object({
+        operations: Type.Array(taskBatchOperationSchema, { description: "Ordered task operations to apply atomically" }),
+      }),
+      execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        prepareStore(ctx);
+        const operations = prepareBatchOperations(params.operations as TaskBatchOperation[]);
+        const result = store.write(operations as any);
+        if (!result.committed) return Promise.resolve(textResult(formatTaskBatchMessage(result)));
+        const visibleResult: TaskBatchResult = {
+          ...result,
+          operations: result.operations.map((operation) => {
+            if (operation.type !== "update") return operation;
+            const originalOperation = params.operations[operation.index - 1] as TaskBatchOperation | undefined;
+            return {
+              ...operation,
+              changedFields: normalizeChangedFields(operation.changedFields, !!originalOperation && originalOperation.type === "update" && originalOperation.metadata !== undefined),
+            };
+          }),
+        };
+        applyPostWriteTracking(operations);
+        if (operations.some((operation) => operation.type === "delete")) {
+          store.deleteFileIfEmpty();
+        }
+        updateTaskWidget(ctx);
+        return Promise.resolve(textResult(formatTaskBatchMessage(visibleResult)));
+      },
+    });
+  }
+
+  if (TASK_MODE === "plan" || TASK_MODE === "dual") {
+    pi.registerTool({
+      name: "update_plan",
+      label: "update_plan",
+      description: UPDATE_PLAN_DESCRIPTION,
+      promptGuidelines: UPDATE_PLAN_GUIDELINES,
+      parameters: updatePlanParametersSchema,
+      execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        prepareStore(ctx);
+        const { plan, operations } = params as { plan: Array<{ step: string; status: string; taskId?: string; description?: string; activeForm?: string; metadata?: Record<string, any> }>; operations?: TaskBatchOperation[] };
+
+        // Normalize plan entries - filter out empty/whitespace-only steps
+        const normalizedPlan = plan.filter((entry) => entry.step && entry.step.trim().length > 0);
+
+        let warnings: string[] = [];
+        let committed = false;
+
+        // Try operations-backed write first if provided
+        if (operations && operations.length > 0) {
+          const preparedOperations = prepareBatchOperations(operations);
+          const result = store.write(preparedOperations as any);
+          if (result.committed) {
+            committed = true;
+            applyPostWriteTracking(preparedOperations);
+            if (preparedOperations.some((operation) => operation.type === "delete")) {
+              store.deleteFileIfEmpty();
+            }
+            warnings = result.operations.flatMap((operation) => operation.warnings);
+          } else {
+            warnings.push(`Operations failed: ${result.error}, falling back to plan reconciliation`);
+          }
+        }
+
+        // Plan reconciliation: ensure store matches the submitted plan.
+        // Always apply reconciliation to converge the visible projection to the submitted plan.
+        // This respects the invariant that plan is the complete visible task list after the call.
+        {
+          const existingTasks = new Map(store.list().map((task) => [task.id, task]));
+
+          // Build reconciliation operations
+          const reconciliationOperations: TaskBatchOperation[] = [];
+          const matchedTaskIds = new Set<string>();
+
+          // First pass: match plan entries to existing tasks by taskId, then by subject
+          for (const entry of normalizedPlan) {
+            let matchedTask: Task | undefined;
+
+            if (entry.taskId && existingTasks.has(entry.taskId)) {
+              matchedTask = existingTasks.get(entry.taskId);
+              matchedTaskIds.add(entry.taskId);
+            } else {
+              // Try to match by subject
+              const subjectKey = entry.step.trim().toLowerCase();
+              for (const [taskId, task] of existingTasks) {
+                if (matchedTaskIds.has(taskId)) continue;
+                if (task.subject.toLowerCase() === subjectKey) {
+                  matchedTask = task;
+                  matchedTaskIds.add(taskId);
+                  break;
+                }
+              }
+            }
+
+            if (matchedTask) {
+              // Update existing task
+              const updateFields: any = {
+                status: entry.status as Task["status"],
+              };
+              if (entry.step.trim() !== matchedTask.subject) {
+                updateFields.subject = entry.step.trim();
+              }
+              if (entry.description !== undefined) {
+                updateFields.description = entry.description;
+              }
+              if (entry.activeForm !== undefined) {
+                updateFields.activeForm = entry.activeForm;
+              }
+              if (entry.metadata !== undefined) {
+                updateFields.metadata = entry.metadata;
+              }
+              reconciliationOperations.push({
+                type: "update",
+                taskId: matchedTask.id,
+                ...updateFields,
+              });
+            } else {
+              // Create new task
+              reconciliationOperations.push({
+                type: "create",
+                subject: entry.step.trim(),
+                description: entry.description || "",
+                status: entry.status as Task["status"],
+                activeForm: entry.activeForm,
+                metadata: entry.metadata,
+              });
+            }
+          }
+
+          // Delete tasks not in the plan
+          for (const [taskId, task] of existingTasks) {
+            if (!matchedTaskIds.has(taskId)) {
+              reconciliationOperations.push({
+                type: "delete",
+                taskId,
+              });
+            }
+          }
+
+          // Apply reconciliation operations
+          if (reconciliationOperations.length > 0) {
+            const preparedReconciliationOps = prepareBatchOperations(reconciliationOperations);
+            const reconciliationResult = store.write(preparedReconciliationOps as any);
+            if (reconciliationResult.committed) {
+              committed = true;
+              applyPostWriteTracking(preparedReconciliationOps);
+              if (preparedReconciliationOps.some((operation) => operation.type === "delete")) {
+                store.deleteFileIfEmpty();
+              }
+              const reconciliationWarnings = reconciliationResult.operations.flatMap((operation) => operation.warnings);
+              warnings.push(...reconciliationWarnings);
+            } else {
+              warnings.push(`Plan reconciliation failed: ${reconciliationResult.error}`);
+            }
+          } else if (existingTasks.size === 0 && normalizedPlan.length === 0) {
+            // Empty plan on empty store is a valid no-op success
+            committed = true;
+          }
+        }
+
+        updateTaskWidget(ctx);
+
+        // Build result message
+        let message = committed ? "Plan updated" : "Plan update failed";
+        if (warnings.length > 0) {
+          message += ` (warnings: ${warnings.join("; ")})`;
+        }
+
+        return Promise.resolve(textResult(message));
+      },
+    });
+  }
 }
