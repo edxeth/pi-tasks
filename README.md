@@ -59,11 +59,19 @@ pi install git:github.com/edxeth/pi-tasks
 
 ### UI
 
-- `/tasks` opens or switches the task widget view
+- `/tasks` opens or switches the task widget view (`on`, `open`, `all`, `hide`, `cycle`, `off`)
 - `/tasks-clear-completed` deletes completed tasks after confirmation
 - `Ctrl+Alt+T` cycles widget mode: Open → All → Hidden
 
 The widget is for interactive sessions. The tools work in any mode.
+
+### tasksMode
+
+The `tasksMode` key in `~/.pi/agent/settings.json` controls the extension:
+
+- `open` (default) / `all` — tools active, widget shown in that view
+- `hidden` — tools active, widget hidden
+- `off` — nothing registers: no tools, no system-prompt guidance, no reminders, no widget. Zero context cost. Only `/tasks` stays available so `/tasks on` can re-enable everything (takes effect in new sessions). Use `/tasks off` to turn it off from a running session.
 
 ### Troubleshooting widget order
 

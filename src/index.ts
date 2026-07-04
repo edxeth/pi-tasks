@@ -35,6 +35,7 @@ const WIDGET_HORIZONTAL_PADDING = 1;
 const DEBUG = !!process.env.PI_TODOS_DEBUG;
 
 type TaskWidgetView = "open" | "all" | "hidden";
+type TasksMode = TaskWidgetView | "off";
 
 type TaskUsageStats = {
   outputTokens?: number;
@@ -79,85 +80,39 @@ type TaskBatchOperation =
       taskId: string;
     };
 
+// One home per rule (PRD-0001 / ADR-0001): this policy block owns lifecycle rules and is
+// the only always-on system-prompt text; tool descriptions own per-tool contract facts and
+// cross-tool routing. Do not restate a rule in more than one channel.
 const TASK_SYSTEM_POLICY = [
   "Task workflow guidance:",
-  "- Use the task tools when the work is non-trivial, multi-step, or clearly benefits from persistence across turns.",
-  "- Skip task tools for a simple one-off job or purely conversational replies.",
-  "- Capture or revise the task list early once the work has become multi-step or the context is growing.",
+  "- Use the task tools when the work is non-trivial or multi-step; skip them for a simple one-off job or purely conversational replies.",
+  "- Capture or revise the task list early once the work has become multi-step.",
   "- Mark a task in_progress before substantial work starts.",
   "- Mark a task completed only when the work is fully done; if it is partial, blocked, or failing verification, leave it pending or in_progress.",
+  "- After completing a task, call task_list to pick the next ready item; prefer lower task IDs when equally ready.",
   "- Use task_get to refresh stale details before updating a task whose latest state may have changed.",
-  "- After completing a task, call task_list to choose the next ready item. Prefer lower task IDs when multiple tasks are equally ready.",
-  "- Use task_create for a new task only when the work is worth tracking, or when later work depends on the ID of this creation.",
-  "- Use task_update for ordinary single-task changes.",
-  "- Use task_batch when creating 2 or more tasks in one turn or when several task mutations should commit together without intermediate reads.",
-  "- Parallel task tool calls are fine for independent reads, but shared task-list writes should usually stay in one task_batch call instead of parallel task_update calls.",
-  "- Subagents may help execute work, but keep the canonical session task list coherent; the parent agent should usually own shared task updates.",
+  "- Keep shared task-list writes in one task_batch call instead of parallel task_update calls; when subagents help execute work, the parent agent owns the canonical task list.",
 ].join("\n");
 
-const TASK_CREATE_DESCRIPTION = `Use this tool to create one structured task for the current coding session.
+const TASK_CREATE_DESCRIPTION =
+  "Create one structured task for the current session. New tasks start as `pending` unless an initial `status` is provided. For 2 or more independent new tasks in one turn, use `task_batch` instead; use `task_create` when later operations depend on the assigned ID.";
 
-Use it when the work is non-trivial, multi-step, or already worth tracking, or when later work depends on the ID of this creation. For 2 or more new tasks in one turn, prefer \`task_batch\` unless you need intermediate reads between creations. Skip it for a simple one-off job, especially at the start of a conversation.
+const TASK_LIST_DESCRIPTION = "List all tasks in the current session-scoped task list, with status and blockers for each.";
 
-New tasks start as \`pending\` unless an initial \`status\` is provided.
+const TASK_GET_DESCRIPTION =
+  "Retrieve one task by ID, including full description, dependency information, metadata, and tracked task stats.";
 
-Fields:
-- **subject**: brief imperative title
-- **description**: concrete context, requirements, and acceptance criteria
-- **status**: optional initial status (\`pending\`, \`in_progress\`, or \`completed\`)
-- **activeForm**: optional present continuous form shown while in_progress
-- **metadata**: optional shallow metadata object`;
+const TASK_UPDATE_DESCRIPTION =
+  "Update one task's fields, metadata, or dependencies. Status flows `pending` → `in_progress` → `completed`; `deleted` removes the task permanently. For several related changes in one turn, use `task_batch` instead.";
 
-const TASK_LIST_DESCRIPTION = `List all tasks in the current session-scoped task list.
+const TASK_BATCH_DESCRIPTION =
+  "Apply multiple task create, update, and delete operations atomically: either the full operation list commits, or none of it does. For a single mutation, prefer `task_create` or `task_update`.";
 
-Use it to see available work, overall progress, blocked tasks, and the next ready item. Results use display ordering: completed tasks first in all-task outputs, with lower IDs first inside each section.`;
-
-const TASK_GET_DESCRIPTION = `Retrieve one task by ID, including full description, dependency information, metadata, and tracked task stats.
-
-Use it before starting work that needs the task's latest requirements, or before updating a task whose state may have changed.`;
-
-const TASK_UPDATE_DESCRIPTION = `Update one task in the current session-scoped task list.
-
-Use it to start work, finish work, revise requirements, merge metadata, or manage dependencies on one task. Status flows \`pending\` → \`in_progress\` → \`completed\`. Use \`deleted\` to remove a task permanently.
-
-Only mark a task \`completed\` when the work is fully done. If work is partial, blocked, or failing verification, leave it pending or in_progress. If several related tasks need to change together, use \`task_batch\` instead.`;
-
-const TASK_BATCH_DESCRIPTION = `Apply multiple task create, update, and delete operations atomically through the canonical task store.
-
-Use this for batched task changes, including creating 2 or more tasks in one turn when you do not need intermediate reads. For ordinary single-task changes, prefer \`task_create\` or \`task_update\`. Either the full operation list commits, or none of it does.`;
-
-const TASK_CREATE_GUIDELINES = [
-  "Capture new multi-step requirements early and keep the session task list current.",
-  "Use task_create only when the work is worth tracking; skip it for a simple one-off job at the start of a conversation.",
-  "Use task_create only for one new task at a time; for 2 or more new tasks in one turn, prefer task_batch unless you need intermediate reads.",
-  "Check task_list before creating more tasks when duplicate or overlapping work is possible.",
-  "Mark tasks in_progress before substantive work begins.",
-  "Keep task metadata concise and relevant to the current task.",
-];
-
-const TASK_LIST_GUIDELINES = [
-  "Use task_list after completing a task to find the next ready task.",
-  "Prefer lower task IDs when multiple tasks are equally ready.",
-  "Use task_get for full details before starting work that depends on exact requirements.",
-];
-
-const TASK_GET_GUIDELINES = [
-  "Use task_get before starting a task that needs its full requirements or dependency context.",
-  "Use task_get before task_update when the latest task state may have changed.",
-];
-
-const TASK_UPDATE_GUIDELINES = [
-  "Set a task to in_progress before substantial work begins.",
-  "Only mark a task completed when the implementation is fully done and not blocked by unresolved issues.",
-  "Call task_list after completing a task to pick the next ready item.",
-  "Use task_update as the default tool for ordinary single-task changes.",
-];
-
-const TASK_BATCH_GUIDELINES = [
-  "Use task_batch for batched create/update/delete flows that should commit atomically.",
-  "Prefer task_batch when creating 2 or more tasks in one turn and you do not need intermediate reads or IDs from earlier results.",
-  "Use task_create or task_update for one-off mutations, or when you need intermediate reads between steps.",
-];
+const TASK_CREATE_SNIPPET = "Track a new task for multi-step work";
+const TASK_LIST_SNIPPET = "List session tasks and their status";
+const TASK_GET_SNIPPET = "Read one task's full details";
+const TASK_UPDATE_SNIPPET = "Update one task's status or fields";
+const TASK_BATCH_SNIPPET = "Apply several task writes atomically";
 
 const SYSTEM_REMINDER_PREFIX = [
   "<system-reminder>",
@@ -345,14 +300,16 @@ function getTaskWidgetSettingsPath(): string {
   return join(getAgentDirPath(), "settings.json");
 }
 
-function readPersistedTaskWidgetView(): TaskWidgetView {
+function readPersistedTasksMode(): TasksMode {
   const settingsPath = getTaskWidgetSettingsPath();
   if (!existsSync(settingsPath)) return "open";
 
   try {
     const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
     const directWidgetView = isRecord(settings) ? settings[TASK_WIDGET_SETTINGS_KEY] : undefined;
-    if (directWidgetView === "open" || directWidgetView === "all" || directWidgetView === "hidden") return directWidgetView;
+    if (directWidgetView === "open" || directWidgetView === "all" || directWidgetView === "hidden" || directWidgetView === "off") {
+      return directWidgetView;
+    }
 
     const legacySettings = isRecord(settings) ? settings[TASK_WIDGET_LEGACY_NAMESPACE] : undefined;
     const legacyWidgetView = isRecord(legacySettings) ? legacySettings[TASK_WIDGET_LEGACY_KEY] : undefined;
@@ -364,7 +321,12 @@ function readPersistedTaskWidgetView(): TaskWidgetView {
   return "open";
 }
 
-function persistTaskWidgetView(widgetView: TaskWidgetView): void {
+function readPersistedTaskWidgetView(): TaskWidgetView {
+  const mode = readPersistedTasksMode();
+  return mode === "off" ? "open" : mode;
+}
+
+function persistTaskWidgetView(widgetView: TasksMode): void {
   const settingsPath = getTaskWidgetSettingsPath();
   const settingsDir = dirname(settingsPath);
   mkdirSync(settingsDir, { recursive: true });
@@ -561,6 +523,23 @@ function chooseMostRecentInProgressTask(todos: Task[]): Task | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+  // tasksMode "off": fully inert (no tools, hooks, widget, shortcut) except /tasks as the way back on.
+  if (readPersistedTasksMode() === "off") {
+    pi.registerCommand("tasks", {
+      description: "Task tools are off; use '/tasks on' to re-enable",
+      handler: async (args, ctx) => {
+        const command = args.trim().toLowerCase();
+        if (command === "on" || command === "open") {
+          persistTaskWidgetView("open");
+          ctx.ui.notify("Task tools re-enabled; takes effect in new sessions", "info");
+          return;
+        }
+        ctx.ui.notify('Task tools are off (tasksMode: "off"). Use /tasks on to re-enable in new sessions.', "info");
+      },
+    });
+    return;
+  }
+
   let store = new TaskStore();
   let storeScopeKey: string | undefined;
   let storeLeafId: string | null | undefined;
@@ -568,6 +547,7 @@ export default function (pi: ExtensionAPI) {
   let lastTaskToolUseTurn = 0;
   let lastReminderTurn = 0;
   let widgetView: TaskWidgetView = readPersistedTaskWidgetView();
+  let offPending = false;
   let activeTaskId: string | undefined;
   let widgetCtx: ExtensionContext | undefined;
   let widgetTicker: ReturnType<typeof setInterval> | undefined;
@@ -841,6 +821,9 @@ export default function (pi: ExtensionAPI) {
 
   function setTaskWidgetView(view: TaskWidgetView) {
     widgetView = view;
+    // While "off" is pending for the next session, view changes stay in-memory so they
+    // cannot silently overwrite the persisted "off"; only /tasks on cancels it.
+    if (offPending) return;
     persistTaskWidgetView(view);
   }
 
@@ -1002,16 +985,22 @@ export default function (pi: ExtensionAPI) {
       prepareStore(ctx);
       const command = args.trim().toLowerCase();
 
-      if (!command || command === "open") {
+      if (!command || command === "open" || command === "on") {
+        if (command === "on") offPending = false;
         setTaskWidgetView("open");
       } else if (command === "all") {
         setTaskWidgetView("all");
       } else if (command === "hide" || command === "hidden") {
         setTaskWidgetView("hidden");
+      } else if (command === "off") {
+        offPending = true;
+        persistTaskWidgetView("off");
+        ctx.ui.notify("Task tools will be off in new sessions; use /tasks on to re-enable", "info");
+        return;
       } else if (command === "cycle") {
         cycleTaskWidgetView();
       } else {
-        ctx.ui.notify("Usage: /tasks [open|all|hide|cycle]", "error");
+        ctx.ui.notify("Usage: /tasks [on|open|all|hide|cycle|off]", "error");
         return;
       }
 
@@ -1072,7 +1061,7 @@ export default function (pi: ExtensionAPI) {
     name: "task_create",
     label: "task_create",
     description: TASK_CREATE_DESCRIPTION,
-    promptGuidelines: TASK_CREATE_GUIDELINES,
+    promptSnippet: TASK_CREATE_SNIPPET,
     parameters: Type.Object({
       subject: Type.String({ description: "A brief title for the task" }),
       description: Type.String({ description: "A detailed description of what needs to be done" }),
@@ -1100,7 +1089,7 @@ export default function (pi: ExtensionAPI) {
     name: "task_list",
     label: "task_list",
     description: TASK_LIST_DESCRIPTION,
-    promptGuidelines: TASK_LIST_GUIDELINES,
+    promptSnippet: TASK_LIST_SNIPPET,
     parameters: Type.Object({}),
     execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       prepareStore(ctx);
@@ -1114,7 +1103,7 @@ export default function (pi: ExtensionAPI) {
     name: "task_get",
     label: "task_get",
     description: TASK_GET_DESCRIPTION,
-    promptGuidelines: TASK_GET_GUIDELINES,
+    promptSnippet: TASK_GET_SNIPPET,
     parameters: Type.Object({
       taskId: Type.String({ description: "The ID of the task to retrieve" }),
     }),
@@ -1130,7 +1119,7 @@ export default function (pi: ExtensionAPI) {
     name: "task_update",
     label: "task_update",
     description: TASK_UPDATE_DESCRIPTION,
-    promptGuidelines: TASK_UPDATE_GUIDELINES,
+    promptSnippet: TASK_UPDATE_SNIPPET,
     parameters: Type.Object({
       taskId: Type.String({ description: "The ID of the task to update" }),
       ...taskUpdateFieldsSchema,
@@ -1156,7 +1145,7 @@ export default function (pi: ExtensionAPI) {
     name: "task_batch",
     label: "task_batch",
     description: TASK_BATCH_DESCRIPTION,
-    promptGuidelines: TASK_BATCH_GUIDELINES,
+    promptSnippet: TASK_BATCH_SNIPPET,
     parameters: Type.Object({
       operations: Type.Array(taskBatchOperationSchema, { description: "Ordered task operations to apply atomically" }),
     }),

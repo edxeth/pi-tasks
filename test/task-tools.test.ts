@@ -177,6 +177,91 @@ function mockPi() {
   };
 }
 
+describe("tasksMode off", () => {
+  function setTasksMode(mode: string) {
+    writeFileSync(join(testAgentDir, "settings.json"), JSON.stringify({ tasksMode: mode }));
+  }
+
+  it("registers no tools, hooks, shortcuts, or widget when tasksMode is off", async () => {
+    setTasksMode("off");
+    const mock = mockPi();
+    const ctx = mockCtx(`tasks-off-${Date.now()}`);
+    initExtension(mock.pi as any);
+
+    expect([...mock.tools.keys()]).toEqual([]);
+    expect([...mock.shortcuts.keys()]).toEqual([]);
+    expect([...mock.commands.keys()]).toEqual(["tasks"]);
+
+    const results = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
+    expect(results.every((result) => result === undefined)).toBe(true);
+  });
+
+  it("re-enables via /tasks on while off, persisting for new sessions", async () => {
+    setTasksMode("off");
+    const mock = mockPi();
+    const ctx = mockCtx(`tasks-off-on-${Date.now()}`, true);
+    initExtension(mock.pi as any);
+
+    await mock.executeCommand("tasks", "on", ctx);
+    const settings = JSON.parse(readFileSync(join(testAgentDir, "settings.json"), "utf-8"));
+    expect(settings.tasksMode).toBe("open");
+
+    const nextSession = mockPi();
+    initExtension(nextSession.pi as any);
+    expect([...nextSession.tools.keys()].sort()).toEqual([
+      "task_batch",
+      "task_create",
+      "task_get",
+      "task_list",
+      "task_update",
+    ]);
+  });
+
+  it("turns off via /tasks off in a normal session, persisting for new sessions", async () => {
+    const mock = mockPi();
+    const ctx = mockCtx(`tasks-to-off-${Date.now()}`, true);
+    initExtension(mock.pi as any);
+
+    await mock.executeCommand("tasks", "off", ctx);
+    const settings = JSON.parse(readFileSync(join(testAgentDir, "settings.json"), "utf-8"));
+    expect(settings.tasksMode).toBe("off");
+
+    const nextSession = mockPi();
+    initExtension(nextSession.pi as any);
+    expect([...nextSession.tools.keys()]).toEqual([]);
+  });
+
+  it("keeps pending off sticky across widget cycling in the same session", async () => {
+    const mock = mockPi();
+    const ctx = mockCtx(`tasks-off-sticky-${Date.now()}`, true);
+    initExtension(mock.pi as any);
+
+    await mock.executeCommand("tasks", "off", ctx);
+    await mock.executeShortcut("ctrl+alt+t", ctx);
+    await mock.executeCommand("tasks", "cycle", ctx);
+    await mock.executeCommand("tasks", "all", ctx);
+
+    const settings = JSON.parse(readFileSync(join(testAgentDir, "settings.json"), "utf-8"));
+    expect(settings.tasksMode).toBe("off");
+  });
+
+  it("cancels pending off with an explicit /tasks on in the same session", async () => {
+    const mock = mockPi();
+    const ctx = mockCtx(`tasks-off-cancel-${Date.now()}`, true);
+    initExtension(mock.pi as any);
+
+    await mock.executeCommand("tasks", "off", ctx);
+    await mock.executeCommand("tasks", "on", ctx);
+
+    const settings = JSON.parse(readFileSync(join(testAgentDir, "settings.json"), "utf-8"));
+    expect(settings.tasksMode).toBe("open");
+
+    const nextSession = mockPi();
+    initExtension(nextSession.pi as any);
+    expect([...nextSession.tools.keys()].length).toBe(5);
+  });
+});
+
 describe("pi-tasks extension", () => {
   it("registers only task tools plus the task widget commands", () => {
     const mock = mockPi();
@@ -204,11 +289,11 @@ describe("pi-tasks extension", () => {
     const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
     expect(result.systemPrompt).toContain("Base prompt");
     expect(result.systemPrompt).toContain("Task workflow guidance:");
-    expect(result.systemPrompt).toContain("Use task_create for a new task only when the work is worth tracking");
-    expect(result.systemPrompt).toContain("Skip task tools for a simple one-off job");
-    expect(result.systemPrompt).toContain("Use task_update for ordinary single-task changes");
-    expect(result.systemPrompt).toContain("Use task_batch when creating 2 or more tasks in one turn");
-    expect(result.systemPrompt).toContain("Subagents may help execute work");
+    expect(result.systemPrompt).toContain("skip them for a simple one-off job");
+    expect(result.systemPrompt).toContain("Mark a task in_progress before substantial work starts");
+    expect(result.systemPrompt).toContain("Mark a task completed only when the work is fully done");
+    expect(result.systemPrompt).toContain("call task_list to pick the next ready item");
+    expect(result.systemPrompt).toContain("one task_batch call instead of parallel task_update calls");
 
     cleanupStore(storePath);
   });
@@ -266,19 +351,61 @@ describe("pi-tasks extension", () => {
     const createTool = mock.tools.get("task_create");
     const batchTool = mock.tools.get("task_batch");
 
-    expect(createTool.description).toContain("create one structured task");
-    expect(createTool.description).toContain("Skip it for a simple one-off job, especially at the start of a conversation.");
-    expect(createTool.description).toContain("For 2 or more new tasks in one turn, prefer `task_batch`");
-    expect(createTool.promptGuidelines).toContain(
-      "Use task_create only when the work is worth tracking; skip it for a simple one-off job at the start of a conversation.",
+    expect(createTool.description).toContain("Create one structured task");
+    expect(createTool.description).toContain("For 2 or more independent new tasks in one turn, use `task_batch` instead");
+    expect(createTool.description).toContain("use `task_create` when later operations depend on the assigned ID");
+    expect(batchTool.description).toContain("atomically");
+    expect(batchTool.description).toContain("For a single mutation, prefer `task_create` or `task_update`.");
+  });
+
+  it("gives every tool a one-line snippet and no guideline bullets", () => {
+    const mock = mockPi();
+    initExtension(mock.pi as any);
+
+    for (const [name, tool] of mock.tools) {
+      expect(tool.promptGuidelines, name).toBeUndefined();
+      expect(typeof tool.promptSnippet, name).toBe("string");
+      expect(tool.promptSnippet.length, name).toBeGreaterThan(0);
+      expect(tool.promptSnippet, name).not.toContain("\n");
+    }
+  });
+
+  it("states every always-on rule sentence exactly once across policy and descriptions", async () => {
+    const mock = mockPi();
+    const ctx = mockCtx(`guidance-unique-${Date.now()}`);
+    initExtension(mock.pi as any);
+
+    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "" }, ctx);
+    const policyBullets = String(result.systemPrompt)
+      .split("\n")
+      .filter((line) => line.startsWith("- "));
+    const descriptionSentences = [...mock.tools.values()].flatMap((tool) => String(tool.description).split(/[.!?](?:\s+|$)/));
+
+    const normalized = [...policyBullets, ...descriptionSentences]
+      .map((sentence) => sentence.toLowerCase().replace(/[^a-z0-9_]+/g, " ").trim())
+      .filter((sentence) => sentence.length > 20);
+
+    const seen = new Set<string>();
+    for (const sentence of normalized) {
+      expect(seen.has(sentence), `duplicated rule: "${sentence}"`).toBe(false);
+      seen.add(sentence);
+    }
+  });
+
+  it("keeps the always-on guidance payload within budget", async () => {
+    const mock = mockPi();
+    const ctx = mockCtx(`guidance-budget-${Date.now()}`);
+    initExtension(mock.pi as any);
+
+    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "" }, ctx);
+    const policyChars = String(result.systemPrompt).length;
+    const toolChars = [...mock.tools.values()].reduce(
+      (total, tool) => total + String(tool.description).length + String(tool.promptSnippet ?? "").length,
+      0,
     );
-    expect(createTool.promptGuidelines).toContain(
-      "Use task_create only for one new task at a time; for 2 or more new tasks in one turn, prefer task_batch unless you need intermediate reads.",
-    );
-    expect(batchTool.description).toContain("including creating 2 or more tasks in one turn");
-    expect(batchTool.promptGuidelines).toContain(
-      "Prefer task_batch when creating 2 or more tasks in one turn and you do not need intermediate reads or IDs from earlier results.",
-    );
+
+    // Budget guard against guidance creep (PRD-0001). Pre-dedup this was ~4,190 chars.
+    expect(policyChars + toolChars).toBeLessThan(2200);
   });
 
   it("bootstraps the global store from the tool call context itself", async () => {
