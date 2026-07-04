@@ -761,7 +761,9 @@ describe("pi-tasks extension", () => {
     const missingCreateFields = await mock.executeTool("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
     const missingTaskId = await mock.executeTool("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
     const unknownAction = await mock.executeTool("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
+    const emptyOps = await mock.executeTool("task_write", { operations: [] }, ctx);
 
+    expect(emptyOps.content[0].text).toContain("operations must be a non-empty array");
     expect(missingCreateFields.content[0].text).toContain("create requires subject and description");
     expect(missingCreateFields.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
     expect(missingTaskId.content[0].text).toContain("update requires taskId");

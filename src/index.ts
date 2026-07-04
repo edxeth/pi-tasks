@@ -1045,8 +1045,8 @@ export default function (pi: ExtensionAPI) {
 
   function normalizeTaskWriteParams(params: unknown): { operations?: unknown[]; error?: ReturnType<typeof textResult> } {
     if (isRecord(params) && params.action !== undefined && params.operations === undefined) return { operations: [params] };
-    if (!isRecord(params) || !Array.isArray(params.operations)) {
-      return { error: teachingError("operations must be an array", CREATE_EXAMPLE) };
+    if (!isRecord(params) || !Array.isArray(params.operations) || params.operations.length === 0) {
+      return { error: teachingError("operations must be a non-empty array", CREATE_EXAMPLE) };
     }
     return { operations: params.operations };
   }
