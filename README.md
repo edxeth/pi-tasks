@@ -13,7 +13,7 @@
 
 It started from `tintinweb/pi-tasks`, took heavy inspiration from Claude Code's task model, and was reworked by [`me`](https://github.com/edxeth) to push toward Claude Code parity where pi can support it cleanly.
 
-Five tools. One widget. File-backed state. Atomic writes. Session-aware restore.
+Two tools. One widget. File-backed state. Atomic writes. Session-aware restore.
 
 This is not Jira in a terminal. It is not a sticky-note toy. It is the discipline layer pi needs once a session stops being trivial!
 
@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/f0229862-417b-4ef2-9486-2b8736b7ce87
 
 ## What you get
 
-- 5 model-callable tools: `task_create`, `task_list`, `task_get`, `task_update`, `task_batch`
+- 2 model-callable tools: `task_write` and `task_list`
 - 2 interactive commands: `/tasks` and `/tasks-clear-completed`
 - `Ctrl+Alt+T` to cycle the widget through Open, All, and Hidden
 - per-session durable storage under `~/.pi/tasks/`
@@ -38,7 +38,7 @@ https://github.com/user-attachments/assets/f0229862-417b-4ef2-9486-2b8736b7ce87
 - hidden read-only reminders after 10 turns without task-tool use
 - per-task stats for runtime, tool usage, last tool, and output tokens
 - output token accounting also includes subagent results, including [`pi-subagents`](https://github.com/edxeth/pi-subagents)
-- atomic batch updates with file locking
+- atomic `task_write` updates with file locking
 - no recycled task IDs
 
 ## Install
@@ -51,11 +51,8 @@ pi install git:github.com/edxeth/pi-tasks
 
 ### Tools
 
-- `task_create` — create one structured task
-- `task_list` — list the session task list
-- `task_get` — inspect one task in detail
-- `task_update` — update status, text, metadata, and dependencies
-- `task_batch` — apply multiple create/update/delete operations atomically
+- `task_write` — apply an atomic operations array for creates, updates, and deletes; single-operation calls auto-wrap, and validation errors show the expected shape
+- `task_list` — show the session task overview, or pass `taskId` to inspect one task in detail
 
 ### UI
 
@@ -91,7 +88,7 @@ After 10 turns of not using the task tools, `pi-tasks` injects a hidden reminder
 
 Task stats are stored in `metadata.stats` and updated from real execution: start time, completion time, tool count, last tool, and output tokens. That token accounting also includes subagent output from [`pi-subagents`](https://github.com/edxeth/pi-subagents), so child-agent output is counted back into the parent task.
 
-`task_batch` is all-or-nothing. If one operation fails, none of it commits. No half-written garbage.
+`task_write` is all-or-nothing. If one operation fails, none of it commits. No half-written garbage.
 
 ## Storage
 

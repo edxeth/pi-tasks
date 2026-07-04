@@ -16,8 +16,8 @@ import {
 } from "./task-store.js";
 import type { Task } from "./task-types.js";
 
-const TASK_MANAGEMENT_TOOL_NAMES = new Set(["task_create", "task_update", "task_batch"]);
-const TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAMES, "task_list", "task_get"]);
+const TASK_MANAGEMENT_TOOL_NAMES = new Set(["task_write"]);
+const TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAMES, "task_list"]);
 const TASK_WIDGET_KEY = "tasks";
 const TASK_WIDGET_SHORTCUT = Key.ctrlAlt("t");
 const REMINDER_INTERVAL = 10;
@@ -55,6 +55,18 @@ type AssistantUsage = {
   output?: number;
 };
 
+type TaskWriteOperation = {
+  action: "create" | "update" | "delete";
+  taskId?: string;
+  subject?: string;
+  description?: string;
+  status?: "pending" | "in_progress" | "completed" | "deleted";
+  activeForm?: string;
+  metadata?: TaskMetadata;
+  addBlocks?: string[];
+  addBlockedBy?: string[];
+};
+
 type TaskBatchOperation =
   | {
       type: "create";
@@ -85,38 +97,40 @@ type TaskBatchOperation =
 // cross-tool routing. Do not restate a rule in more than one channel.
 const TASK_SYSTEM_POLICY = [
   "Task workflow guidance:",
-  "- Use the task tools when the work is non-trivial or multi-step; skip them for a simple one-off job or purely conversational replies.",
+  "- Create tasks with task_write for multi-step or multi-part work, including reviews, audits, debugging, and research passes that span multiple files; also when you generate follow-up steps while working that should not be lost. Skip for a single trivial action.",
   "- Capture or revise the task list early once the work has become multi-step.",
   "- Mark a task in_progress before substantial work starts.",
   "- Mark a task completed only when the work is fully done; if it is partial, blocked, or failing verification, leave it pending or in_progress.",
   "- After completing a task, call task_list to pick the next ready item; prefer lower task IDs when equally ready.",
-  "- Use task_get to refresh stale details before updating a task whose latest state may have changed.",
-  "- Keep shared task-list writes in one task_batch call instead of parallel task_update calls; when subagents help execute work, the parent agent owns the canonical task list.",
+  "- Use task_list to refresh stale details before updating a task whose latest state may have changed.",
+  "- Keep shared task-list writes in one task_write call instead of parallel task_write calls; when subagents help execute work, the parent agent owns the canonical task list.",
 ].join("\n");
 
-const TASK_CREATE_DESCRIPTION =
-  "Create one structured task for the current session. New tasks start as `pending` unless an initial `status` is provided. For 2 or more independent new tasks in one turn, use `task_batch` instead; use `task_create` when later operations depend on the assigned ID.";
+const TASK_WRITE_DESCRIPTION =
+  'Create/update/delete tasks atomically; use task_list for reads. Example: {"operations":[{"action":"create","subject":"S","description":"D"}]}';
 
-const TASK_LIST_DESCRIPTION = "List all tasks in the current session-scoped task list, with status and blockers for each.";
+const TASK_LIST_DESCRIPTION = "List all tasks, or pass taskId for full details before a write.";
 
-const TASK_GET_DESCRIPTION =
-  "Retrieve one task by ID, including full description, dependency information, metadata, and tracked task stats.";
+const TASK_WRITE_SNIPPET = "Create, update, or delete tasks atomically";
+const TASK_LIST_SNIPPET = "List tasks or read one task's details";
 
-const TASK_UPDATE_DESCRIPTION =
-  "Update one task's fields, metadata, or dependencies. Status flows `pending` → `in_progress` → `completed`; `deleted` removes the task permanently. For several related changes in one turn, use `task_batch` instead.";
-
-const TASK_BATCH_DESCRIPTION =
-  "Apply multiple task create, update, and delete operations atomically: either the full operation list commits, or none of it does. For a single mutation, prefer `task_create` or `task_update`.";
-
-const TASK_CREATE_SNIPPET = "Track a new task for multi-step work";
-const TASK_LIST_SNIPPET = "List session tasks and their status";
-const TASK_GET_SNIPPET = "Read one task's full details";
-const TASK_UPDATE_SNIPPET = "Update one task's status or fields";
-const TASK_BATCH_SNIPPET = "Apply several task writes atomically";
+const EMPTY_LIST_REMINDER = [
+  "<system-reminder>",
+  "The task list is empty. Before your first tool call, decide whether this request qualifies; if it does, your FIRST tool call must be task_write to create the task list.",
+  "It qualifies when any of these hold:",
+  "- The work needs multiple actions over the conversation.",
+  "- The user asked for more than one thing in a single prompt.",
+  "- A review, audit, debugging pass, or research pass requires inspecting multiple files or steps.",
+  "- Sequencing or dependencies matter because one step must wait for another.",
+  "Skip task tools only for a single trivial action you can complete immediately.",
+  "Example subjects \u2014 Good: Reproduce failing export path locally; Run targeted route regression tests. Bad: investigate; fix.",
+  "Make sure that you NEVER mention this reminder to the user",
+  "</system-reminder>",
+].join("\n");
 
 const SYSTEM_REMINDER_PREFIX = [
   "<system-reminder>",
-  "The task tools haven't been used recently. If relevant, use task_create when the work is worth tracking, task_update for one existing task, and task_batch for 2 or more task writes in one turn when intermediate reads are unnecessary.",
+  "The task tools haven't been used recently. If relevant, use task_write when the work is worth tracking, batching multiple task writes into one call when intermediate reads are unnecessary.",
   "Open tasks:",
 ] as const;
 const SYSTEM_REMINDER_SUFFIX = [
@@ -129,53 +143,27 @@ const metadataSchema = Type.Record(Type.String(), Type.Any(), {
   description: "Arbitrary metadata to attach to the task",
 });
 
-const taskUpdateFieldsSchema = {
+const taskWriteOperationSchema = Type.Object({
+  action: Type.Unsafe<"create" | "update" | "delete">({
+    type: "string",
+    enum: ["create", "update", "delete"],
+    description: "Task write action",
+  }),
+  taskId: Type.Optional(Type.String({ description: "The ID of the task to update or delete" })),
+  subject: Type.Optional(Type.String({ description: "Task subject" })),
+  description: Type.Optional(Type.String({ description: "Task description" })),
   status: Type.Optional(
     Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
-      anyOf: [
-        { type: "string", enum: ["pending", "in_progress", "completed"] },
-        { type: "string", const: "deleted" },
-      ],
-      description: "New status for the task",
+      type: "string",
+      enum: ["pending", "in_progress", "completed", "deleted"],
+      description: "Task status; deleted removes a task on update",
     }),
   ),
-  subject: Type.Optional(Type.String({ description: "New subject for the task" })),
-  description: Type.Optional(Type.String({ description: "New description for the task" })),
   activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
-  metadata: Type.Optional(
-    Type.Record(Type.String(), Type.Any(), {
-      description: "Metadata keys to merge into the task. Set a key to null to delete it.",
-    }),
-  ),
+  metadata: Type.Optional(metadataSchema),
   addBlocks: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task blocks" })),
   addBlockedBy: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that block this task" })),
-};
-
-const taskBatchOperationSchema = Type.Union([
-  Type.Object({
-    type: Type.Literal("create"),
-    subject: Type.String({ description: "A brief title for the task" }),
-    description: Type.String({ description: "A detailed description of what needs to be done" }),
-    status: Type.Optional(
-      Type.Unsafe<"pending" | "in_progress" | "completed">({
-        type: "string",
-        enum: ["pending", "in_progress", "completed"],
-        description: "Optional initial status for the new task",
-      }),
-    ),
-    activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
-    metadata: Type.Optional(metadataSchema),
-  }),
-  Type.Object({
-    type: Type.Literal("update"),
-    taskId: Type.String({ description: "The ID of the task to update" }),
-    ...taskUpdateFieldsSchema,
-  }),
-  Type.Object({
-    type: Type.Literal("delete"),
-    taskId: Type.String({ description: "The ID of the task to delete" }),
-  }),
-]);
+});
 
 function debug(...args: unknown[]) {
   if (DEBUG) console.error("[pi-tasks]", ...args);
@@ -192,9 +180,9 @@ function formatUpdateMessage(taskId: string, changedFields: string[], warnings: 
   return message;
 }
 
-function formatTaskBatchMessage(result: TaskBatchResult) {
+function formatTaskWriteMessage(result: TaskBatchResult) {
   if (!result.committed) {
-    return `task_batch failed: ${result.error}\nNo changes were committed.`;
+    return `task_write failed: ${result.error}\nNo changes were committed.`;
   }
 
   const lines = result.operations.map((operation) => {
@@ -546,6 +534,7 @@ export default function (pi: ExtensionAPI) {
   let currentTurn = 0;
   let lastTaskToolUseTurn = 0;
   let lastReminderTurn = 0;
+  let emptyListNudgeShown = false;
   let widgetView: TaskWidgetView = readPersistedTaskWidgetView();
   let offPending = false;
   let activeTaskId: string | undefined;
@@ -675,17 +664,6 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  function prepareTaskUpdate(taskId: string, fields: Record<string, any>) {
-    const todo = store.get(taskId);
-    if (!todo) return fields;
-    const nextStats = withStatusStats(todo, fields.status);
-    if (!nextStats) return fields;
-    return {
-      ...fields,
-      metadata: mergeMetadata(fields.metadata, nextStats),
-    };
-  }
-
   function prepareBatchOperations(operations: TaskBatchOperation[]): TaskBatchOperation[] {
     const preview = new Map(store.list().map((todo) => [todo.id, todo]));
     const prepared: TaskBatchOperation[] = [];
@@ -728,15 +706,7 @@ export default function (pi: ExtensionAPI) {
     return prepared;
   }
 
-  function applyPostWriteTracking(operations: TaskBatchOperation[]) {
-    for (const operation of operations) {
-      if (operation.type === "create") continue;
-      if (operation.type !== "update") continue;
-      if (operation.status === "in_progress") activeTaskId = operation.taskId;
-      if ((operation.status === "completed" || operation.status === "deleted") && activeTaskId === operation.taskId) {
-        activeTaskId = undefined;
-      }
-    }
+  function applyPostWriteTracking() {
     const active = chooseMostRecentInProgressTask(store.list());
     if (active) activeTaskId = active.id;
     else resolveActiveTaskId();
@@ -847,6 +817,7 @@ export default function (pi: ExtensionAPI) {
     currentTurn = 0;
     lastTaskToolUseTurn = 0;
     lastReminderTurn = 0;
+    emptyListNudgeShown = false;
     activeTaskId = undefined;
     if (ctx.hasUI) widgetCtx = ctx;
     prepareStore(ctx, options);
@@ -1047,6 +1018,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("context", async (event) => {
+    if (!emptyListNudgeShown) {
+      emptyListNudgeShown = true;
+      if (store.list().length === 0) {
+        return {
+          messages: [...event.messages, { role: "user", content: EMPTY_LIST_REMINDER, timestamp: Date.now() }],
+        };
+      }
+    }
     if (currentTurn - lastTaskToolUseTurn < REMINDER_INTERVAL) return undefined;
     if (currentTurn - lastReminderTurn < REMINDER_INTERVAL) return undefined;
     const reminder = getSystemReminder(store);
@@ -1057,31 +1036,116 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
+  const CREATE_EXAMPLE = '{"operations":[{"action":"create","subject":"...","description":"..."}]}';
+  const UPDATE_EXAMPLE = '{"operations":[{"action":"update","taskId":"1","status":"completed"}]}';
+
+  function teachingError(message: string, expected: string) {
+    return textResult(`task_write failed: ${message}\nexpected: ${expected}`);
+  }
+
+  function normalizeTaskWriteParams(params: unknown): { operations?: unknown[]; error?: ReturnType<typeof textResult> } {
+    if (isRecord(params) && params.action !== undefined && params.operations === undefined) return { operations: [params] };
+    if (!isRecord(params) || !Array.isArray(params.operations)) {
+      return { error: teachingError("operations must be an array", CREATE_EXAMPLE) };
+    }
+    return { operations: params.operations };
+  }
+
+  function toTaskBatchOperations(rawOperations: any[]): { operations?: TaskBatchOperation[]; error?: ReturnType<typeof textResult> } {
+    const operations: TaskBatchOperation[] = [];
+    for (const [index, rawOperation] of rawOperations.entries()) {
+      const operationIndex = index + 1;
+      if (!isRecord(rawOperation)) {
+        return { error: teachingError(`operation ${operationIndex} must be an object`, CREATE_EXAMPLE) };
+      }
+      if (rawOperation.action !== "create" && rawOperation.action !== "update" && rawOperation.action !== "delete") {
+        return { error: teachingError(`operation ${operationIndex} has unknown action`, UPDATE_EXAMPLE) };
+      }
+      if (
+        rawOperation.status !== undefined &&
+        rawOperation.status !== "pending" &&
+        rawOperation.status !== "in_progress" &&
+        rawOperation.status !== "completed" &&
+        rawOperation.status !== "deleted"
+      ) {
+        return { error: teachingError(`operation ${operationIndex} has invalid status`, UPDATE_EXAMPLE) };
+      }
+
+      const operation = rawOperation as TaskWriteOperation;
+      if (operation.action === "create") {
+        if (!operation.subject || !operation.description) {
+          return { error: teachingError(`operation ${operationIndex} create requires subject and description`, CREATE_EXAMPLE) };
+        }
+        if (operation.status === "deleted") {
+          return { error: teachingError(`operation ${operationIndex} create cannot use status deleted`, '{"operations":[{"action":"create","subject":"...","description":"...","status":"pending"}]}') };
+        }
+        operations.push({
+          type: "create",
+          subject: operation.subject,
+          description: operation.description,
+          status: operation.status,
+          activeForm: operation.activeForm,
+          metadata: operation.metadata,
+        });
+        continue;
+      }
+
+      if (!operation.taskId) {
+        return { error: teachingError(`operation ${operationIndex} ${operation.action} requires taskId`, UPDATE_EXAMPLE) };
+      }
+      if (operation.action === "delete") {
+        operations.push({ type: "delete", taskId: operation.taskId });
+        continue;
+      }
+      operations.push({
+        type: "update",
+        taskId: operation.taskId,
+        status: operation.status,
+        subject: operation.subject,
+        description: operation.description,
+        activeForm: operation.activeForm,
+        metadata: operation.metadata,
+        addBlocks: operation.addBlocks,
+        addBlockedBy: operation.addBlockedBy,
+      });
+    }
+    return { operations };
+  }
+
   pi.registerTool({
-    name: "task_create",
-    label: "task_create",
-    description: TASK_CREATE_DESCRIPTION,
-    promptSnippet: TASK_CREATE_SNIPPET,
+    name: "task_write",
+    label: "task_write",
+    description: TASK_WRITE_DESCRIPTION,
+    promptSnippet: TASK_WRITE_SNIPPET,
     parameters: Type.Object({
-      subject: Type.String({ description: "A brief title for the task" }),
-      description: Type.String({ description: "A detailed description of what needs to be done" }),
-      status: Type.Optional(
-        Type.Unsafe<"pending" | "in_progress" | "completed">({
-          type: "string",
-          enum: ["pending", "in_progress", "completed"],
-          description: "Optional initial status for the new task",
-        }),
-      ),
-      activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
-      metadata: Type.Optional(metadataSchema),
+      operations: Type.Array(taskWriteOperationSchema, { description: "Ordered task operations to apply atomically" }),
     }),
     execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       prepareStore(ctx);
-      const fields = prepareCreateFields(params);
-      const todo = store.create(fields.subject, fields.description, fields.status, fields.activeForm, fields.metadata);
-      if (todo.status === "in_progress") activeTaskId = todo.id;
+      const normalized = normalizeTaskWriteParams(params);
+      if (normalized.error) return Promise.resolve(normalized.error);
+      const converted = toTaskBatchOperations(normalized.operations ?? []);
+      if (converted.error) return Promise.resolve(converted.error);
+      const operations = prepareBatchOperations(converted.operations ?? []);
+      const result = store.write(operations as any);
+      if (!result.committed) return Promise.resolve(textResult(formatTaskWriteMessage(result)));
+      const visibleResult: TaskBatchResult = {
+        ...result,
+        operations: result.operations.map((operation) => {
+          if (operation.type !== "update") return operation;
+          const originalOperation = converted.operations?.[operation.index - 1];
+          return {
+            ...operation,
+            changedFields: normalizeChangedFields(operation.changedFields, !!originalOperation && originalOperation.type === "update" && originalOperation.metadata !== undefined),
+          };
+        }),
+      };
+      applyPostWriteTracking();
+      if (operations.some((operation) => operation.type === "delete" || (operation.type === "update" && operation.status === "deleted"))) {
+        store.deleteFileIfEmpty();
+      }
       updateTaskWidget(ctx);
-      return Promise.resolve(textResult(`Task #${todo.id} created successfully: ${todo.subject}`));
+      return Promise.resolve(textResult(formatTaskWriteMessage(visibleResult)));
     },
   });
 
@@ -1090,87 +1154,19 @@ export default function (pi: ExtensionAPI) {
     label: "task_list",
     description: TASK_LIST_DESCRIPTION,
     promptSnippet: TASK_LIST_SNIPPET,
-    parameters: Type.Object({}),
-    execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    parameters: Type.Object({
+      taskId: Type.Optional(Type.String({ description: "The ID of the task to retrieve" })),
+    }),
+    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       prepareStore(ctx);
+      if (params.taskId) {
+        const todo = store.get(params.taskId);
+        if (!todo) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
+        return Promise.resolve(textResult([`Task #${todo.id}: ${todo.subject}`, ...getTaskDetailLines(todo, store).slice(1)].join("\n")));
+      }
       const todos = sortTasksForAllView(store.list());
       if (todos.length === 0) return Promise.resolve(textResult("No tasks found"));
       return Promise.resolve(textResult(todos.map((todo) => formatTaskLine(todo, store)).join("\n")));
-    },
-  });
-
-  pi.registerTool({
-    name: "task_get",
-    label: "task_get",
-    description: TASK_GET_DESCRIPTION,
-    promptSnippet: TASK_GET_SNIPPET,
-    parameters: Type.Object({
-      taskId: Type.String({ description: "The ID of the task to retrieve" }),
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const todo = store.get(params.taskId);
-      if (!todo) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
-      return Promise.resolve(textResult([`Task #${todo.id}: ${todo.subject}`, ...getTaskDetailLines(todo, store).slice(1)].join("\n")));
-    },
-  });
-
-  pi.registerTool({
-    name: "task_update",
-    label: "task_update",
-    description: TASK_UPDATE_DESCRIPTION,
-    promptSnippet: TASK_UPDATE_SNIPPET,
-    parameters: Type.Object({
-      taskId: Type.String({ description: "The ID of the task to update" }),
-      ...taskUpdateFieldsSchema,
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const { taskId, ...rawFields } = params;
-      const fields = prepareTaskUpdate(taskId, rawFields);
-      const { todo, changedFields, warnings } = store.update(taskId, fields);
-      if (changedFields.length === 0 && !todo) return Promise.resolve(textResult(`Task #${taskId} not found`));
-      const visibleChangedFields = normalizeChangedFields(changedFields, rawFields.metadata !== undefined);
-      if (fields.status === "in_progress") activeTaskId = taskId;
-      if ((fields.status === "completed" || fields.status === "deleted") && activeTaskId === taskId) activeTaskId = undefined;
-      if (fields.status === "deleted") {
-        store.deleteFileIfEmpty();
-      }
-      updateTaskWidget(ctx);
-      return Promise.resolve(textResult(formatUpdateMessage(taskId, visibleChangedFields, warnings)));
-    },
-  });
-
-  pi.registerTool({
-    name: "task_batch",
-    label: "task_batch",
-    description: TASK_BATCH_DESCRIPTION,
-    promptSnippet: TASK_BATCH_SNIPPET,
-    parameters: Type.Object({
-      operations: Type.Array(taskBatchOperationSchema, { description: "Ordered task operations to apply atomically" }),
-    }),
-    execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      prepareStore(ctx);
-      const operations = prepareBatchOperations(params.operations as TaskBatchOperation[]);
-      const result = store.write(operations as any);
-      if (!result.committed) return Promise.resolve(textResult(formatTaskBatchMessage(result)));
-      const visibleResult: TaskBatchResult = {
-        ...result,
-        operations: result.operations.map((operation) => {
-          if (operation.type !== "update") return operation;
-          const originalOperation = params.operations[operation.index - 1] as TaskBatchOperation | undefined;
-          return {
-            ...operation,
-            changedFields: normalizeChangedFields(operation.changedFields, !!originalOperation && originalOperation.type === "update" && originalOperation.metadata !== undefined),
-          };
-        }),
-      };
-      applyPostWriteTracking(operations);
-      if (operations.some((operation) => operation.type === "delete")) {
-        store.deleteFileIfEmpty();
-      }
-      updateTaskWidget(ctx);
-      return Promise.resolve(textResult(formatTaskBatchMessage(visibleResult)));
     },
   });
 }

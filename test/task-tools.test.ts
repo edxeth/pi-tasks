@@ -164,6 +164,15 @@ function mockPi() {
       });
       return result;
     },
+    async createTask(params: any, ctx: any) {
+      return this.executeTool("task_write", { operations: [{ action: "create", ...params }] }, ctx);
+    },
+    async updateTask(params: any, ctx: any) {
+      return this.executeTool("task_write", { operations: [{ action: "update", ...params }] }, ctx);
+    },
+    async taskDetail(taskId: string, ctx: any) {
+      return this.executeTool("task_list", { taskId }, ctx);
+    },
     async executeShortcut(shortcut: string, ctx: any) {
       const handler = shortcuts.get(shortcut);
       if (!handler) throw new Error(`Missing shortcut ${shortcut}`);
@@ -208,13 +217,7 @@ describe("tasksMode off", () => {
 
     const nextSession = mockPi();
     initExtension(nextSession.pi as any);
-    expect([...nextSession.tools.keys()].sort()).toEqual([
-      "task_batch",
-      "task_create",
-      "task_get",
-      "task_list",
-      "task_update",
-    ]);
+    expect([...nextSession.tools.keys()].sort()).toEqual(["task_list", "task_write"]);
   });
 
   it("turns off via /tasks off in a normal session, persisting for new sessions", async () => {
@@ -258,7 +261,7 @@ describe("tasksMode off", () => {
 
     const nextSession = mockPi();
     initExtension(nextSession.pi as any);
-    expect([...nextSession.tools.keys()].length).toBe(5);
+    expect([...nextSession.tools.keys()].length).toBe(2);
   });
 });
 
@@ -267,13 +270,7 @@ describe("pi-tasks extension", () => {
     const mock = mockPi();
     initExtension(mock.pi as any);
 
-    expect([...mock.tools.keys()].sort()).toEqual([
-      "task_batch",
-      "task_create",
-      "task_get",
-      "task_list",
-      "task_update",
-    ]);
+    expect([...mock.tools.keys()].sort()).toEqual(["task_list", "task_write"]);
     expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clear-completed"]);
   });
 
@@ -289,11 +286,12 @@ describe("pi-tasks extension", () => {
     const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
     expect(result.systemPrompt).toContain("Base prompt");
     expect(result.systemPrompt).toContain("Task workflow guidance:");
-    expect(result.systemPrompt).toContain("skip them for a simple one-off job");
+    expect(result.systemPrompt).toContain("Create tasks with task_write for multi-step or multi-part work");
+    expect(result.systemPrompt).toContain("Skip for a single trivial action");
     expect(result.systemPrompt).toContain("Mark a task in_progress before substantial work starts");
     expect(result.systemPrompt).toContain("Mark a task completed only when the work is fully done");
     expect(result.systemPrompt).toContain("call task_list to pick the next ready item");
-    expect(result.systemPrompt).toContain("one task_batch call instead of parallel task_update calls");
+    expect(result.systemPrompt).toContain("one task_write call instead of parallel task_write calls");
 
     cleanupStore(storePath);
   });
@@ -307,7 +305,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
-    await mock.executeTool("task_create", { subject: "Ship rename", description: "Finish the rename" }, ctx);
+    await mock.createTask( { subject: "Ship rename", description: "Finish the rename" }, ctx);
 
     expect(storePath).toContain("/.pi/tasks/");
     expect(storePath.endsWith(`/${sessionId}`)).toBe(true);
@@ -319,7 +317,7 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
-  it("allows task_create to set an initial in-progress status", async () => {
+  it("allows task_write to set an initial in-progress status", async () => {
     const sessionId = `todo-create-status-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
     cleanupStore(storePath);
@@ -328,7 +326,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId, true);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
-    await mock.executeTool("task_create", { subject: "Ship rename", description: "Finish the rename", status: "in_progress" }, ctx);
+    await mock.createTask( { subject: "Ship rename", description: "Finish the rename", status: "in_progress" }, ctx);
 
     expect(readTaskFile(storePath, "1")).toMatchObject({
       subject: "Ship rename",
@@ -344,18 +342,17 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
-  it("describes single-create and multi-create batching boundaries clearly", () => {
+  it("describes the consolidated write and read routing clearly", () => {
     const mock = mockPi();
     initExtension(mock.pi as any);
 
-    const createTool = mock.tools.get("task_create");
-    const batchTool = mock.tools.get("task_batch");
+    const writeTool = mock.tools.get("task_write");
+    const listTool = mock.tools.get("task_list");
 
-    expect(createTool.description).toContain("Create one structured task");
-    expect(createTool.description).toContain("For 2 or more independent new tasks in one turn, use `task_batch` instead");
-    expect(createTool.description).toContain("use `task_create` when later operations depend on the assigned ID");
-    expect(batchTool.description).toContain("atomically");
-    expect(batchTool.description).toContain("For a single mutation, prefer `task_create` or `task_update`.");
+    expect(writeTool.description).toContain("Create/update/delete tasks atomically");
+    expect(writeTool.description).toContain("use task_list for reads");
+    expect(writeTool.description).toContain('{"operations":[{"action":"create"');
+    expect(listTool.description).toContain("pass taskId for full details");
   });
 
   it("gives every tool a one-line snippet and no guideline bullets", () => {
@@ -370,7 +367,7 @@ describe("pi-tasks extension", () => {
     }
   });
 
-  it("states every always-on rule sentence exactly once across policy and descriptions", async () => {
+  it("states every always-on rule sentence exactly once across policy, descriptions, and snippets", async () => {
     const mock = mockPi();
     const ctx = mockCtx(`guidance-unique-${Date.now()}`);
     initExtension(mock.pi as any);
@@ -379,9 +376,12 @@ describe("pi-tasks extension", () => {
     const policyBullets = String(result.systemPrompt)
       .split("\n")
       .filter((line) => line.startsWith("- "));
-    const descriptionSentences = [...mock.tools.values()].flatMap((tool) => String(tool.description).split(/[.!?](?:\s+|$)/));
+    const toolGuidance = [...mock.tools.values()].flatMap((tool) => [
+      ...String(tool.description).split(/[.!?](?:\s+|$)/),
+      String(tool.promptSnippet ?? ""),
+    ]);
 
-    const normalized = [...policyBullets, ...descriptionSentences]
+    const normalized = [...policyBullets, ...toolGuidance]
       .map((sentence) => sentence.toLowerCase().replace(/[^a-z0-9_]+/g, " ").trim())
       .filter((sentence) => sentence.length > 20);
 
@@ -405,7 +405,7 @@ describe("pi-tasks extension", () => {
     );
 
     // Budget guard against guidance creep (PRD-0001). Pre-dedup this was ~4,190 chars.
-    expect(policyChars + toolChars).toBeLessThan(2200);
+    expect(policyChars + toolChars).toBeLessThan(1800);
   });
 
   it("bootstraps the global store from the tool call context itself", async () => {
@@ -417,8 +417,8 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
 
-    const tool = mock.tools.get("task_create");
-    await tool.execute("call-1", { subject: "Direct", description: "Desc" }, undefined, undefined, ctx);
+    const tool = mock.tools.get("task_write");
+    await tool.execute("call-1", { operations: [{ action: "create", subject: "Direct", description: "Desc" }] }, undefined, undefined, ctx);
 
     expect(existsSync(join(storePath, "1.json"))).toBe(true);
     expect(readTaskFile(storePath, "1").subject).toBe("Direct");
@@ -436,11 +436,11 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
-    await mock.executeTool("task_create", { subject: "First", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "First", description: "Desc" }, ctx);
     await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 1 } } }, ctx);
 
     ctx.setLeafId("leaf-b");
-    await mock.executeTool("task_create", { subject: "Second", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Second", description: "Desc" }, ctx);
     await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 1 } } }, ctx);
 
     ctx.setLeafId("leaf-a");
@@ -467,7 +467,7 @@ describe("pi-tasks extension", () => {
 
     const parentCtx = mockCtx(parentSession, false, { leafId: "leaf-a" });
     await mock.fireLifecycle("session_start", { reason: "startup" }, parentCtx);
-    await mock.executeTool("task_create", { subject: "Parent", description: "Desc" }, parentCtx);
+    await mock.createTask( { subject: "Parent", description: "Desc" }, parentCtx);
     await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 1 } } }, parentCtx);
 
     const childCtx = mockCtx(childSession, false, { leafId: "leaf-a" });
@@ -490,17 +490,17 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    await mock.executeTool("task_create", { subject: "Completed blocker", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Blocked pending", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "In progress", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Open blocker", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Unblocked pending", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "2", addBlockedBy: ["4", "1"] }, ctx);
-    await mock.executeTool("task_update", { taskId: "3", status: "in_progress" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Completed blocker", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Blocked pending", description: "Desc", metadata: { priority: "high" } }, ctx);
+    await mock.createTask( { subject: "In progress", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Open blocker", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Unblocked pending", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "2", addBlockedBy: ["4", "1"] }, ctx);
+    await mock.updateTask( { taskId: "3", status: "in_progress" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
     const list = await mock.executeTool("task_list", {}, ctx);
-    const get = await mock.executeTool("task_get", { taskId: "2" }, ctx);
+    const get = await mock.taskDetail("2", ctx);
 
     expect(list.content[0].text).toBe([
       "#1 [completed] Completed blocker · 0s",
@@ -510,7 +510,9 @@ describe("pi-tasks extension", () => {
       "#5 [pending] Unblocked pending",
     ].join("\n"));
     expect(get.content[0].text).toContain("Task #2: Blocked pending");
+    expect(get.content[0].text).toContain("description: Desc");
     expect(get.content[0].text).toContain("blocked by: #4");
+    expect(get.content[0].text).toContain('metadata: {"priority":"high"}');
     expect(get.content[0].text).not.toContain("#1");
 
     cleanupStore(storePath);
@@ -526,15 +528,15 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    const created = await mock.executeTool("task_create", { subject: "One", description: "Desc" }, ctx);
-    const missingGet = await mock.executeTool("task_get", { taskId: "99" }, ctx);
-    const missingUpdate = await mock.executeTool("task_update", { taskId: "99", status: "completed" }, ctx);
-    const warned = await mock.executeTool("task_update", { taskId: "1", addBlockedBy: ["1", "999"] }, ctx);
+    const created = await mock.createTask( { subject: "One", description: "Desc" }, ctx);
+    const missingGet = await mock.taskDetail("99", ctx);
+    const missingUpdate = await mock.updateTask( { taskId: "99", status: "completed" }, ctx);
+    const warned = await mock.updateTask( { taskId: "1", addBlockedBy: ["1", "999"] }, ctx);
 
-    expect(created.content[0].text).toBe("Task #1 created successfully: One");
+    expect(created.content[0].text).toBe("Operation 1: Task #1 created successfully: One");
     expect(missingGet.content[0].text).toBe("Task #99 not found");
-    expect(missingUpdate.content[0].text).toBe("Task #99 not found");
-    expect(warned.content[0].text).toBe("Updated task #1 blockedBy (warning: #1 blocks itself; #999 does not exist)");
+    expect(missingUpdate.content[0].text).toBe("task_write failed: operation 1 update task #99 not found\nNo changes were committed.");
+    expect(warned.content[0].text).toBe("Operation 1: Updated task #1 blockedBy\nWarnings: operation 1: #1 blocks itself; operation 1: #999 does not exist");
 
     cleanupStore(storePath);
   });
@@ -553,16 +555,16 @@ describe("pi-tasks extension", () => {
       initExtension(mock.pi as any);
       await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-      await mock.executeTool("task_create", { subject: "Instrumented", description: "Desc" }, ctx);
-      await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
+      await mock.createTask( { subject: "Instrumented", description: "Desc" }, ctx);
+      await mock.updateTask( { taskId: "1", status: "in_progress" }, ctx);
 
       vi.advanceTimersByTime(5_000);
       await mock.fireLifecycle("tool_execution_end", { toolName: "bash", toolCallId: "call-2", result: {}, isError: false }, ctx);
       await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 30 } } }, ctx);
       vi.advanceTimersByTime(15_000);
-      await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+      await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
-      const get = await mock.executeTool("task_get", { taskId: "1" }, ctx);
+      const get = await mock.taskDetail("1", ctx);
       const list = await mock.executeTool("task_list", {}, ctx);
       const raw = readTaskFile(storePath, "1");
 
@@ -595,8 +597,8 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    await mock.executeTool("task_create", { subject: "Subagents", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
+    await mock.createTask( { subject: "Subagents", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "in_progress" }, ctx);
 
     await mock.fireLifecycle(
       "tool_execution_end",
@@ -625,7 +627,7 @@ describe("pi-tasks extension", () => {
       ctx,
     );
 
-    const get = await mock.executeTool("task_get", { taskId: "1" }, ctx);
+    const get = await mock.taskDetail("1", ctx);
     const raw = readTaskFile(storePath, "1");
 
     expect(get.content[0].text).toContain("output: 25 tokens");
@@ -644,10 +646,10 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    await mock.executeTool("task_create", { subject: "One", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Two", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "deleted" }, ctx);
-    const created = await mock.executeTool("task_create", { subject: "Three", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "One", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Two", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "deleted" }, ctx);
+    const created = await mock.createTask( { subject: "Three", description: "Desc" }, ctx);
 
     expect(created.content[0].text).toContain("Task #3 created successfully: Three");
     expect(existsSync(join(storePath, "1.json"))).toBe(false);
@@ -656,7 +658,7 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
-  it("applies task_batch atomically and returns per-operation results", async () => {
+  it("applies task_write atomically and returns per-operation results", async () => {
     const sessionId = `todo-write-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
     cleanupStore(storePath);
@@ -666,15 +668,15 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    await mock.executeTool("task_create", { subject: "Existing", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Existing", description: "Desc" }, ctx);
 
     const result = await mock.executeTool(
-      "task_batch",
+      "task_write",
       {
         operations: [
-          { type: "create", subject: "Batch create", description: "Desc", status: "in_progress" },
-          { type: "update", taskId: "1", status: "in_progress" },
-          { type: "update", taskId: "2", addBlockedBy: ["1", "999"] },
+          { action: "create", subject: "Batch create", description: "Desc", status: "in_progress" },
+          { action: "update", taskId: "1", status: "in_progress" },
+          { action: "update", taskId: "2", addBlockedBy: ["1", "999"] },
         ],
       },
       ctx,
@@ -696,7 +698,7 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
-  it("rolls back task_batch when one operation fails", async () => {
+  it("rolls back task_write when one operation fails", async () => {
     const sessionId = `todo-write-fail-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
     cleanupStore(storePath);
@@ -706,20 +708,20 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    await mock.executeTool("task_create", { subject: "Existing", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Existing", description: "Desc" }, ctx);
 
     const result = await mock.executeTool(
-      "task_batch",
+      "task_write",
       {
         operations: [
-          { type: "create", subject: "Should not persist", description: "Desc" },
-          { type: "update", taskId: "99", status: "completed" },
+          { action: "create", subject: "Should not persist", description: "Desc" },
+          { action: "update", taskId: "99", status: "completed" },
         ],
       },
       ctx,
     );
 
-    expect(result.content[0].text).toBe("task_batch failed: operation 2 update task #99 not found\nNo changes were committed.");
+    expect(result.content[0].text).toBe("task_write failed: operation 2 update task #99 not found\nNo changes were committed.");
     expect(existsSync(join(storePath, "2.json"))).toBe(false);
 
     const list = await mock.executeTool("task_list", {}, ctx);
@@ -728,7 +730,77 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
-  it("matches equivalent granular updates after task_batch commits", async () => {
+  it("auto-wraps a single flat task_write operation", async () => {
+    const sessionId = `todo-write-autowrap-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    const result = await mock.executeTool("task_write", { action: "create", subject: "Flat", description: "Desc" }, ctx);
+
+    expect(result.content[0].text).toBe("Operation 1: Task #1 created successfully: Flat");
+    expect(readTaskFile(storePath, "1").subject).toBe("Flat");
+
+    cleanupStore(storePath);
+  });
+
+  it("returns teaching errors for invalid task_write shapes", async () => {
+    const sessionId = `todo-write-errors-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    const missingCreateFields = await mock.executeTool("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
+    const missingTaskId = await mock.executeTool("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
+    const unknownAction = await mock.executeTool("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
+
+    expect(missingCreateFields.content[0].text).toContain("create requires subject and description");
+    expect(missingCreateFields.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
+    expect(missingTaskId.content[0].text).toContain("update requires taskId");
+    expect(missingTaskId.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    expect(unknownAction.content[0].text).toContain("unknown action");
+    expect(unknownAction.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    expect(existsSync(join(storePath, "1.json"))).toBe(false);
+
+    cleanupStore(storePath);
+  });
+
+  it("rolls back task_write when handler validation rejects one operation", async () => {
+    const sessionId = `todo-write-validation-fail-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    const result = await mock.executeTool(
+      "task_write",
+      {
+        operations: [
+          { action: "create", subject: "Should not persist", description: "Desc" },
+          { action: "update", status: "completed" },
+        ],
+      },
+      ctx,
+    );
+
+    expect(result.content[0].text).toContain("update requires taskId");
+    expect(existsSync(join(storePath, "1.json"))).toBe(false);
+
+    cleanupStore(storePath);
+  });
+
+  it("matches equivalent granular updates after task_write commits", async () => {
     const writeSessionId = `todo-write-eq-${Date.now()}`;
     const granularSessionId = `todo-granular-eq-${Date.now()}`;
     const writePath = getSessionTaskDirPath(writeSessionId);
@@ -740,15 +812,15 @@ describe("pi-tasks extension", () => {
     const writeCtx = mockCtx(writeSessionId);
     initExtension(writeMock.pi as any);
     await writeMock.fireLifecycle("before_agent_start", {}, writeCtx);
-    await writeMock.executeTool("task_create", { subject: "First", description: "Desc" }, writeCtx);
-    await writeMock.executeTool("task_create", { subject: "Second", description: "Desc" }, writeCtx);
+    await writeMock.createTask( { subject: "First", description: "Desc" }, writeCtx);
+    await writeMock.createTask( { subject: "Second", description: "Desc" }, writeCtx);
     await writeMock.executeTool(
-      "task_batch",
+      "task_write",
       {
         operations: [
-          { type: "update", taskId: "1", status: "in_progress" },
-          { type: "update", taskId: "2", addBlockedBy: ["1"] },
-          { type: "create", subject: "Third", description: "Desc" },
+          { action: "update", taskId: "1", status: "in_progress" },
+          { action: "update", taskId: "2", addBlockedBy: ["1"] },
+          { action: "create", subject: "Third", description: "Desc" },
         ],
       },
       writeCtx,
@@ -759,11 +831,11 @@ describe("pi-tasks extension", () => {
     const granularCtx = mockCtx(granularSessionId);
     initExtension(granularMock.pi as any);
     await granularMock.fireLifecycle("before_agent_start", {}, granularCtx);
-    await granularMock.executeTool("task_create", { subject: "First", description: "Desc" }, granularCtx);
-    await granularMock.executeTool("task_create", { subject: "Second", description: "Desc" }, granularCtx);
-    await granularMock.executeTool("task_update", { taskId: "1", status: "in_progress" }, granularCtx);
-    await granularMock.executeTool("task_update", { taskId: "2", addBlockedBy: ["1"] }, granularCtx);
-    await granularMock.executeTool("task_create", { subject: "Third", description: "Desc" }, granularCtx);
+    await granularMock.createTask( { subject: "First", description: "Desc" }, granularCtx);
+    await granularMock.createTask( { subject: "Second", description: "Desc" }, granularCtx);
+    await granularMock.updateTask( { taskId: "1", status: "in_progress" }, granularCtx);
+    await granularMock.updateTask( { taskId: "2", addBlockedBy: ["1"] }, granularCtx);
+    await granularMock.createTask( { subject: "Third", description: "Desc" }, granularCtx);
     const granularList = await granularMock.executeTool("task_list", {}, granularCtx);
 
     expect(writeList.content[0].text).toBe(granularList.content[0].text);
@@ -783,14 +855,14 @@ describe("pi-tasks extension", () => {
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
     expect(ctx.widgetSetCalls.get("tasks")).toBe(1);
 
-    await mock.executeTool("task_create", { subject: "Completed blocker", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Blocked pending", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "In progress", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Open blocker", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Unblocked pending", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "2", addBlockedBy: ["4", "1"] }, ctx);
-    await mock.executeTool("task_update", { taskId: "3", status: "in_progress" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Completed blocker", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Blocked pending", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "In progress", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Open blocker", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Unblocked pending", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "2", addBlockedBy: ["4", "1"] }, ctx);
+    await mock.updateTask( { taskId: "3", status: "in_progress" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
     expect(ctx.widgetSetCalls.get("tasks")).toBe(1);
 
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
@@ -820,11 +892,11 @@ describe("pi-tasks extension", () => {
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
       for (let i = 1; i <= 18; i++) {
-        await mock.executeTool("task_create", { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
+        await mock.createTask( { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
       }
       vi.advanceTimersByTime(31_000);
-      await mock.executeTool("task_create", { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
-      await mock.executeTool("task_create", { subject: "Next", description: "Desc" }, ctx);
+      await mock.createTask( { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
+      await mock.createTask( { subject: "Next", description: "Desc" }, ctx);
 
       await mock.executeCommand("tasks", "all", ctx);
 
@@ -864,11 +936,11 @@ describe("pi-tasks extension", () => {
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
       for (let i = 1; i <= 18; i++) {
-        await mock.executeTool("task_create", { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
+        await mock.createTask( { subject: `Old done ${i}`, description: "Desc", status: "completed" }, ctx);
       }
       vi.advanceTimersByTime(31_000);
-      await mock.executeTool("task_create", { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
-      await mock.executeTool("task_create", { subject: "Next", description: "Desc" }, ctx);
+      await mock.createTask( { subject: "Current", description: "Desc", status: "in_progress" }, ctx);
+      await mock.createTask( { subject: "Next", description: "Desc" }, ctx);
 
       await mock.executeCommand("tasks", "all", ctx);
 
@@ -900,9 +972,9 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
-    await mock.executeTool("task_create", { subject: "Done", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Open", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Done", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
@@ -988,7 +1060,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId, true);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
-    await mock.executeTool("task_create", {
+    await mock.createTask( {
       subject: "Rename pi-share traces to pi-r2-share",
       description: "Desc",
       status: "in_progress",
@@ -1015,7 +1087,7 @@ describe("pi-tasks extension", () => {
       initExtension(mock.pi as any);
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
       await mock.executeCommand("tasks", "all", ctx);
-      await mock.executeTool("task_create", { subject: "Done", description: "Desc", status: "completed" }, ctx);
+      await mock.createTask( { subject: "Done", description: "Desc", status: "completed" }, ctx);
 
       expect(ctx.widgets.get("tasks")?.join("\n")).toContain("Done");
       const setCallsBeforeInput = ctx.widgetSetCalls.get("tasks") ?? 0;
@@ -1050,17 +1122,17 @@ describe("pi-tasks extension", () => {
       vi.advanceTimersByTime(3_000);
       expect(ctx.widgetRenderCalls.get("tasks")).toBe(startupRenders);
 
-      await mock.executeTool("task_create", { subject: "Pending", description: "Desc" }, ctx);
+      await mock.createTask( { subject: "Pending", description: "Desc" }, ctx);
       const pendingRenders = ctx.widgetRenderCalls.get("tasks");
       vi.advanceTimersByTime(3_000);
       expect(ctx.widgetRenderCalls.get("tasks")).toBe(pendingRenders);
 
-      await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
+      await mock.updateTask( { taskId: "1", status: "in_progress" }, ctx);
       const inProgressRenders = ctx.widgetRenderCalls.get("tasks") ?? 0;
       vi.advanceTimersByTime(1_000);
       expect(ctx.widgetRenderCalls.get("tasks")).toBe(inProgressRenders + 1);
 
-      await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+      await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
       const completedRenders = ctx.widgetRenderCalls.get("tasks");
       vi.advanceTimersByTime(3_000);
       expect(ctx.widgetRenderCalls.get("tasks")).toBe(completedRenders);
@@ -1083,8 +1155,8 @@ describe("pi-tasks extension", () => {
       const ctx = mockCtx(sessionId, true);
       initExtension(mock.pi as any);
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
-      await mock.executeTool("task_create", { subject: "Live", description: "Desc" }, ctx);
-      await mock.executeTool("task_update", { taskId: "1", status: "in_progress" }, ctx);
+      await mock.createTask( { subject: "Live", description: "Desc" }, ctx);
+      await mock.updateTask( { taskId: "1", status: "in_progress" }, ctx);
 
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
@@ -1121,10 +1193,10 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
-    await mock.executeTool("task_create", { subject: "Done", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Open", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Also open", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Done", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Also open", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
     await mock.executeCommand("tasks-clear-completed", "", ctx);
     expect(ctx.confirmCalls).toEqual([
@@ -1161,8 +1233,8 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
-    await mock.executeTool("task_create", { subject: "Done", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Done", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
     for (let turn = 0; turn < 10; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);
@@ -1180,6 +1252,48 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
+  it("injects a one-time empty-list nudge on the first context event", async () => {
+    const sessionId = `todo-empty-nudge-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+    await mock.fireLifecycle("turn_start", {}, ctx);
+
+    const [nudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(nudge?.messages).toHaveLength(1);
+    expect(nudge.messages[0].role).toBe("user");
+    expect(nudge.messages[0].content).toContain("The task list is empty");
+    expect(nudge.messages[0].content).toContain("your FIRST tool call must be task_write");
+    expect(nudge.messages[0].content).toContain("more than one thing in a single prompt");
+    expect(nudge.messages[0].content).toContain("review, audit, debugging pass, or research pass");
+    expect(nudge.messages[0].content).toContain("NEVER mention this reminder");
+
+    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+
+    cleanupStore(storePath);
+  });
+
+  it("skips the empty-list nudge when tasks already exist", async () => {
+    const sessionId = `todo-empty-nudge-skip-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+    await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
+    await mock.fireLifecycle("turn_start", {}, ctx);
+
+    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+
+    cleanupStore(storePath);
+  });
+
   it("injects a hidden read-only reminder into context after 10 assistant turns and repeats every 10 turns", async () => {
     const sessionId = `todo-reminder-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
@@ -1189,9 +1303,9 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
-    await mock.executeTool("task_create", { subject: "Open", description: "Desc" }, ctx);
-    await mock.executeTool("task_create", { subject: "Done", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "2", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Done", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "2", status: "completed" }, ctx);
 
     for (let turn = 0; turn < 9; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);
@@ -1205,8 +1319,8 @@ describe("pi-tasks extension", () => {
     expect(firstReminder?.messages).toHaveLength(1);
     expect(firstReminder.messages[0].role).toBe("user");
     expect(firstReminder.messages[0].content).toContain("task tools haven't been used recently");
-    expect(firstReminder.messages[0].content).toContain("use task_create when the work is worth tracking");
-    expect(firstReminder.messages[0].content).toContain("task_batch for 2 or more task writes in one turn");
+    expect(firstReminder.messages[0].content).toContain("use task_write when the work is worth tracking");
+    expect(firstReminder.messages[0].content).toContain("batching multiple task writes into one call");
     expect(firstReminder.messages[0].content).toContain("Open tasks:");
     expect(firstReminder.messages[0].content).toContain("#1 [pending] Open");
     expect(firstReminder.messages[0].content).not.toContain("Done");
@@ -1237,7 +1351,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
-    await mock.executeTool("task_create", { subject: "Open", description: "Desc" }, ctx);
+    await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
 
     for (let turn = 0; turn < 9; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);
@@ -1261,8 +1375,8 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
-    await mock.executeTool("task_create", { subject: "Done", description: "Desc" }, ctx);
-    await mock.executeTool("task_update", { taskId: "1", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Done", description: "Desc" }, ctx);
+    await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
     for (let turn = 0; turn < 10; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);

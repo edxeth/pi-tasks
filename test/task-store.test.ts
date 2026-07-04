@@ -103,7 +103,7 @@ describe("TaskStore (in-memory)", () => {
     ]);
   });
 
-  it("applies task_batch batches atomically in memory", () => {
+  it("applies task_write operations atomically in memory", () => {
     store.create("Existing", "Desc");
 
     const result = store.write([
@@ -123,7 +123,7 @@ describe("TaskStore (in-memory)", () => {
     ]);
   });
 
-  it("does not partially commit task_batch when one operation fails", () => {
+  it("does not partially commit task_write when one operation fails", () => {
     store.create("Existing", "Desc");
 
     const result = store.write([
@@ -217,7 +217,7 @@ describe("TaskStore (file-backed)", () => {
     expect(second.create("Next", "Desc").id).toBe("2");
   });
 
-  it("keeps task_batch all-or-nothing on disk when a later operation fails", () => {
+  it("keeps task_write all-or-nothing on disk when a later operation fails", () => {
     const store = new TaskStore(storePath);
     store.create("Existing", "Desc");
 
