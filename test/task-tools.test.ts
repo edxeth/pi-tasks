@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { validateToolArguments } from "../node_modules/@earendil-works/pi-ai/dist/utils/validation.js";
 import initExtension from "../src/index.js";
 import { getSessionTaskDirPath } from "../src/task-store.js";
 
@@ -163,6 +164,13 @@ function mockPi() {
         isError: false,
       });
       return result;
+    },
+    async executeToolThroughValidation(name: string, params: any, ctx: any) {
+      const tool = tools.get(name);
+      if (!tool) throw new Error(`Missing tool ${name}`);
+      const prepared = tool.prepareArguments ? tool.prepareArguments(params) : params;
+      const validated = validateToolArguments(tool, { name, arguments: prepared } as any);
+      return this.executeTool(name, validated, ctx);
     },
     async createTask(params: any, ctx: any) {
       return this.executeTool("task_write", { operations: [{ action: "create", ...params }] }, ctx);
@@ -740,7 +748,7 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    const result = await mock.executeTool("task_write", { action: "create", subject: "Flat", description: "Desc" }, ctx);
+    const result = await mock.executeToolThroughValidation("task_write", { action: "create", subject: "Flat", description: "Desc" }, ctx);
 
     expect(result.content[0].text).toBe("Operation 1: Task #1 created successfully: Flat");
     expect(readTaskFile(storePath, "1").subject).toBe("Flat");
@@ -758,13 +766,16 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    const missingCreateFields = await mock.executeTool("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
-    const missingBothFields = await mock.executeTool("task_write", { operations: [{ action: "create", status: "pending" }] }, ctx);
-    const missingTaskId = await mock.executeTool("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
-    const unknownAction = await mock.executeTool("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
-    const emptyOps = await mock.executeTool("task_write", { operations: [] }, ctx);
+    const missingAction = await mock.executeToolThroughValidation("task_write", { operations: [{ taskId: "1", status: "completed" }] }, ctx);
+    const missingCreateFields = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
+    const missingBothFields = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "create", status: "pending" }] }, ctx);
+    const missingTaskId = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
+    const unknownAction = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
+    const invalidStatus = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "update", taskId: "1", status: "done" }] }, ctx);
+    const emptyOps = await mock.executeToolThroughValidation("task_write", { operations: [] }, ctx);
 
     expect(emptyOps.content[0].text).toContain("operations must be a non-empty array");
+    expect(missingAction.content[0].text).toContain("requires action");
     expect(missingCreateFields.content[0].text).toContain("create requires description");
     expect(missingBothFields.content[0].text).toContain("create requires subject and description");
     expect(missingCreateFields.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
@@ -772,6 +783,31 @@ describe("pi-tasks extension", () => {
     expect(missingTaskId.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
     expect(unknownAction.content[0].text).toContain("unknown action");
     expect(unknownAction.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    expect(invalidStatus.content[0].text).toContain("invalid status");
+    expect(invalidStatus.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    expect(existsSync(join(storePath, "1.json"))).toBe(false);
+
+    cleanupStore(storePath);
+  });
+
+  it("rejects create dependencies instead of silently dropping them", async () => {
+    const sessionId = `todo-write-create-dependencies-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    const result = await mock.executeToolThroughValidation(
+      "task_write",
+      { operations: [{ action: "create", subject: "Blocked", description: "Desc", addBlockedBy: ["99"] }] },
+      ctx,
+    );
+
+    expect(result.content[0].text).toContain("create cannot use addBlockedBy");
+    expect(result.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
     expect(existsSync(join(storePath, "1.json"))).toBe(false);
 
     cleanupStore(storePath);

@@ -156,25 +156,15 @@ const metadataSchema = Type.Record(Type.String(), Type.Any(), {
 });
 
 const taskWriteOperationSchema = Type.Object({
-  action: Type.Unsafe<"create" | "update" | "delete">({
-    type: "string",
-    enum: ["create", "update", "delete"],
-    description: "Task write action",
-  }),
+  action: Type.Optional(Type.String({ description: "Required task write action: create, update, or delete" })),
   taskId: Type.Optional(Type.String({ description: "The ID of the task to update or delete" })),
   subject: Type.Optional(Type.String({ description: "Task subject (required for create)" })),
   description: Type.Optional(Type.String({ description: "Task description (required for create)" })),
-  status: Type.Optional(
-    Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
-      type: "string",
-      enum: ["pending", "in_progress", "completed", "deleted"],
-      description: "Task status; deleted removes a task on update",
-    }),
-  ),
+  status: Type.Optional(Type.String({ description: "Task status: pending, in_progress, completed, or deleted" })),
   activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
   metadata: Type.Optional(metadataSchema),
-  addBlocks: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this task blocks" })),
-  addBlockedBy: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that block this task" })),
+  addBlocks: Type.Optional(Type.Array(Type.String(), { description: "Update only: task IDs this task blocks" })),
+  addBlockedBy: Type.Optional(Type.Array(Type.String(), { description: "Update only: task IDs that block this task" })),
 });
 
 function debug(...args: unknown[]) {
@@ -1089,6 +1079,13 @@ export default function (pi: ExtensionAPI) {
     return failedTaskResult(`task_write failed: ${message}\nexpected: ${expected}`);
   }
 
+  function prepareTaskWriteArguments(params: unknown) {
+    if (isRecord(params) && params.action !== undefined && params.operations === undefined) {
+      return { operations: [params] };
+    }
+    return params as any;
+  }
+
   function normalizeTaskWriteParams(params: unknown): { operations?: unknown[]; error?: ReturnType<typeof textResult> } {
     if (isRecord(params) && params.action !== undefined && params.operations === undefined) return { operations: [params] };
     if (!isRecord(params) || !Array.isArray(params.operations) || params.operations.length === 0) {
@@ -1097,12 +1094,24 @@ export default function (pi: ExtensionAPI) {
     return { operations: params.operations };
   }
 
+  function getUnsupportedFields(rawOperation: Record<string, any>, allowedFields: Set<string>): string[] {
+    const operationFields = ["taskId", "subject", "description", "status", "activeForm", "metadata", "addBlocks", "addBlockedBy"];
+    return operationFields.filter((field) => rawOperation[field] !== undefined && !allowedFields.has(field));
+  }
+
+  const CREATE_OPERATION_FIELDS = new Set(["subject", "description", "status", "activeForm", "metadata"]);
+  const UPDATE_OPERATION_FIELDS = new Set(["taskId", "subject", "description", "status", "activeForm", "metadata", "addBlocks", "addBlockedBy"]);
+  const DELETE_OPERATION_FIELDS = new Set(["taskId"]);
+
   function toTaskBatchOperations(rawOperations: any[]): { operations?: TaskBatchOperation[]; error?: ReturnType<typeof textResult> } {
     const operations: TaskBatchOperation[] = [];
     for (const [index, rawOperation] of rawOperations.entries()) {
       const operationIndex = index + 1;
       if (!isRecord(rawOperation)) {
         return { error: teachingError(`operation ${operationIndex} must be an object`, CREATE_EXAMPLE) };
+      }
+      if (rawOperation.action === undefined) {
+        return { error: teachingError(`operation ${operationIndex} requires action`, CREATE_EXAMPLE) };
       }
       if (rawOperation.action !== "create" && rawOperation.action !== "update" && rawOperation.action !== "delete") {
         return { error: teachingError(`operation ${operationIndex} has unknown action`, UPDATE_EXAMPLE) };
@@ -1118,6 +1127,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       const operation = rawOperation as TaskWriteOperation;
+      const allowedFields =
+        operation.action === "create" ? CREATE_OPERATION_FIELDS : operation.action === "update" ? UPDATE_OPERATION_FIELDS : DELETE_OPERATION_FIELDS;
+      const unsupportedFields = getUnsupportedFields(rawOperation, allowedFields);
+      if (unsupportedFields.length > 0) {
+        return { error: teachingError(`operation ${operationIndex} ${operation.action} cannot use ${unsupportedFields.join(", ")}`, operation.action === "delete" ? UPDATE_EXAMPLE : CREATE_EXAMPLE) };
+      }
+
       if (operation.action === "create") {
         if (!operation.subject || !operation.description) {
           const missing = [!operation.subject && "subject", !operation.description && "description"].filter(Boolean).join(" and ");
@@ -1167,6 +1183,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       operations: Type.Array(taskWriteOperationSchema, { description: "Ordered task operations to apply atomically" }),
     }),
+    prepareArguments: prepareTaskWriteArguments,
     execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       prepareStore(ctx);
       const normalized = normalizeTaskWriteParams(params);
