@@ -759,12 +759,14 @@ describe("pi-tasks extension", () => {
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
     const missingCreateFields = await mock.executeTool("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
+    const missingBothFields = await mock.executeTool("task_write", { operations: [{ action: "create", status: "pending" }] }, ctx);
     const missingTaskId = await mock.executeTool("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
     const unknownAction = await mock.executeTool("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
     const emptyOps = await mock.executeTool("task_write", { operations: [] }, ctx);
 
     expect(emptyOps.content[0].text).toContain("operations must be a non-empty array");
-    expect(missingCreateFields.content[0].text).toContain("create requires subject and description");
+    expect(missingCreateFields.content[0].text).toContain("create requires description");
+    expect(missingBothFields.content[0].text).toContain("create requires subject and description");
     expect(missingCreateFields.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
     expect(missingTaskId.content[0].text).toContain("update requires taskId");
     expect(missingTaskId.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
@@ -1270,6 +1272,7 @@ describe("pi-tasks extension", () => {
     expect(nudge.messages[0].role).toBe("user");
     expect(nudge.messages[0].content).toContain("The task list is empty");
     expect(nudge.messages[0].content).toContain("your FIRST tool call must be task_write");
+    expect(nudge.messages[0].content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
     expect(nudge.messages[0].content).toContain("more than one thing in a single prompt");
     expect(nudge.messages[0].content).toContain("review, audit, debugging pass, or research pass");
     expect(nudge.messages[0].content).toContain("NEVER mention this reminder");

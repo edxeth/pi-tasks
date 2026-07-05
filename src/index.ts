@@ -123,6 +123,7 @@ const EMPTY_LIST_REMINDER = [
   "- A review, audit, debugging pass, or research pass requires inspecting multiple files or steps.",
   "- Sequencing or dependencies matter because one step must wait for another.",
   "Skip task tools only for a single trivial action you can complete immediately.",
+  'Call shape: {"operations":[{"action":"create","subject":"...","description":"..."}]} — "action" is mandatory on every operation.',
   "Example subjects \u2014 Good: Reproduce failing export path locally; Run targeted route regression tests. Bad: investigate; fix.",
   "Make sure that you NEVER mention this reminder to the user",
   "</system-reminder>",
@@ -150,8 +151,8 @@ const taskWriteOperationSchema = Type.Object({
     description: "Task write action",
   }),
   taskId: Type.Optional(Type.String({ description: "The ID of the task to update or delete" })),
-  subject: Type.Optional(Type.String({ description: "Task subject" })),
-  description: Type.Optional(Type.String({ description: "Task description" })),
+  subject: Type.Optional(Type.String({ description: "Task subject (required for create)" })),
+  description: Type.Optional(Type.String({ description: "Task description (required for create)" })),
   status: Type.Optional(
     Type.Unsafe<"pending" | "in_progress" | "completed" | "deleted">({
       type: "string",
@@ -1074,7 +1075,8 @@ export default function (pi: ExtensionAPI) {
       const operation = rawOperation as TaskWriteOperation;
       if (operation.action === "create") {
         if (!operation.subject || !operation.description) {
-          return { error: teachingError(`operation ${operationIndex} create requires subject and description`, CREATE_EXAMPLE) };
+          const missing = [!operation.subject && "subject", !operation.description && "description"].filter(Boolean).join(" and ");
+          return { error: teachingError(`operation ${operationIndex} create requires ${missing}`, CREATE_EXAMPLE) };
         }
         if (operation.status === "deleted") {
           return { error: teachingError(`operation ${operationIndex} create cannot use status deleted`, '{"operations":[{"action":"create","subject":"...","description":"...","status":"pending"}]}') };
