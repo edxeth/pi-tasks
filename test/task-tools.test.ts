@@ -961,6 +961,39 @@ describe("pi-tasks extension", () => {
     }
   });
 
+  it("dims completed task lines and strikes through only the completed title in the All widget view", async () => {
+    const sessionId = `todo-widget-completed-title-style-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId, true);
+    ctx.ui.theme = {
+      ...ctx.ui.theme,
+      fg(color: string, text: string) {
+        return color === "muted" ? `[dim:${text}]` : text;
+      },
+      strikethrough(text: string) {
+        return `[strike:${text}]`;
+      },
+    };
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+
+    await mock.createTask( { subject: "Done title", description: "Desc", status: "completed" }, ctx);
+    await mock.createTask( { subject: "Open title", description: "Desc" }, ctx);
+    await mock.executeCommand("tasks", "all", ctx);
+
+    expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
+      "Tasks",
+      "[dim:1 open · 1 completed · 2 total] · Ctrl+Alt+T to cycle",
+      "○ #2 Open title",
+      "[dim:✓ #1 [strike:[dim:Done title]] [dim:· 0s]]",
+    ]));
+
+    cleanupStore(storePath);
+  });
+
   it("uses terminal height to cap the All widget", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-15T14:30:00.000Z"));

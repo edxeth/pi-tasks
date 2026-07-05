@@ -771,7 +771,10 @@ export default function (pi: ExtensionAPI) {
     } else {
       for (const todo of displayedTodos) {
         const iconColor = todo.status === "completed" ? "success" : todo.status === "in_progress" ? "accent" : "dim";
-        let line = `${theme.fg(iconColor, getTaskIcon(todo.status))} ${theme.fg("accent", `#${todo.id}`)} ${todo.subject}`;
+        // Keep the title muted inside strikethrough because ANSI resets in that segment
+        // would otherwise cancel the completed-line dim color.
+        const subject = todo.status === "completed" ? theme.strikethrough(theme.fg("muted", todo.subject)) : todo.subject;
+        let line = `${theme.fg(iconColor, getTaskIcon(todo.status))} ${theme.fg("accent", `#${todo.id}`)} ${subject}`;
         const openBlockers = getOpenBlockers(store, todo.blockedBy);
         if (openBlockers.length > 0) line += ` ${theme.fg("muted", `[blocked by ${openBlockers.map((id) => `#${id}`).join(", ")}]`)}`;
         const stats = formatTaskStatsInline(todo);
