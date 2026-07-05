@@ -21,6 +21,8 @@ const TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAME
 const TASK_WIDGET_KEY = "tasks";
 const TASK_WIDGET_SHORTCUT = Key.ctrlAlt("t");
 const REMINDER_INTERVAL = 10;
+const REMINDER_INTERVAL_PRESSURE = 5;
+const CONTEXT_PRESSURE_CHARS = 200000;
 const STATS_METADATA_KEY = "stats";
 const TASK_WIDGET_SETTINGS_KEY = "tasksMode";
 const TASK_WIDGET_LEGACY_NAMESPACE = "piTasks";
@@ -132,8 +134,17 @@ const EMPTY_LIST_REMINDER = [
 const SYSTEM_REMINDER_PREFIX = [
   "<system-reminder>",
   "The task tools haven't been used recently. If relevant, use task_write when the work is worth tracking, batching multiple task writes into one call when intermediate reads are unnecessary.",
+  'Mark tasks in_progress/completed as you go via task_write, e.g. {"operations":[{"action":"update","taskId":"1","status":"completed"}]}.',
   "Open tasks:",
 ] as const;
+
+const EMPTY_REMINDER_COMPACT = [
+  "<system-reminder>",
+  "The task list is still empty several steps into this work. If it qualifies (multiple actions, or more than one thing was asked), your next tool call should be task_write.",
+  'Shape: {"operations":[{"action":"create","subject":"...","description":"..."}]} — "action" is mandatory on every operation.',
+  "Ignore if all that remains is a single trivial action. Never mention this reminder.",
+  "</system-reminder>",
+].join("\n");
 const SYSTEM_REMINDER_SUFFIX = [
   "Only open tasks are listed here. This reminder is read-only; ignore it if not applicable.",
   "Make sure that you NEVER mention this reminder to the user",
@@ -222,10 +233,39 @@ function formatReminderTaskLine(todo: Task, store: TaskStore): string {
 
 function getSystemReminder(store: TaskStore): string | undefined {
   const openTasks = store.list().filter((todo) => todo.status !== "completed");
-  if (openTasks.length === 0) return undefined;
+  if (openTasks.length === 0) {
+    // Truly-empty list several turns in = trigger-skip risk; nudge with the create shape.
+    // Completed-but-no-open stays silent (work was tracked and finished).
+    return store.list().length === 0 ? EMPTY_REMINDER_COMPACT : undefined;
+  }
   return [...SYSTEM_REMINDER_PREFIX, ...openTasks.map((todo) => formatReminderTaskLine(todo, store)), ...SYSTEM_REMINDER_SUFFIX].join(
     "\n",
   );
+}
+
+function estimateContextChars(messages: readonly unknown[]): number {
+  let total = 0;
+  for (const message of messages) {
+    const content = message && typeof message === "object" ? (message as { content?: unknown }).content : undefined;
+    if (typeof content === "string") total += content.length;
+    else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof (block as { text?: unknown }).text === "string") total += (block as { text: string }).text.length;
+      }
+    }
+  }
+  return total;
+}
+
+function isFailedTaskResult(event: { isError?: boolean; content?: unknown }): boolean {
+  if (event.isError) return true;
+  const content = event.content;
+  const text = Array.isArray(content)
+    ? content.map((block) => (block && typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : "")).join("")
+    : typeof content === "string"
+      ? content
+      : "";
+  return text.startsWith("task_write failed") || text.startsWith('Validation failed for tool "task_write"');
 }
 
 function getTaskIcon(status: "pending" | "in_progress" | "completed") {
@@ -1012,7 +1052,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event) => {
-    if (TASK_MANAGEMENT_TOOL_NAMES.has(event.toolName)) {
+    // A rejected task_write must NOT count as recent use, or it silences the very reminder
+    // that would correct it (the long-context update-abandonment case).
+    if (TASK_MANAGEMENT_TOOL_NAMES.has(event.toolName) && !isFailedTaskResult(event)) {
       lastTaskToolUseTurn = currentTurn;
     }
     return {};
@@ -1027,8 +1069,9 @@ export default function (pi: ExtensionAPI) {
         };
       }
     }
-    if (currentTurn - lastTaskToolUseTurn < REMINDER_INTERVAL) return undefined;
-    if (currentTurn - lastReminderTurn < REMINDER_INTERVAL) return undefined;
+    const interval = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS ? REMINDER_INTERVAL_PRESSURE : REMINDER_INTERVAL;
+    if (currentTurn - lastTaskToolUseTurn < interval) return undefined;
+    if (currentTurn - lastReminderTurn < interval) return undefined;
     const reminder = getSystemReminder(store);
     if (!reminder) return undefined;
     lastReminderTurn = currentTurn;

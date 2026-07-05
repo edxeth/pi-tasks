@@ -1392,4 +1392,78 @@ describe("pi-tasks extension", () => {
 
     cleanupStore(storePath);
   });
+
+  it("re-nudges with the create shape when the list stays truly empty past the interval", async () => {
+    const sessionId = `todo-reminder-empty-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    // First context event consumes the one-time full empty-list nudge.
+    const [oneTime] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(oneTime.messages[0].content).toContain("The task list is empty");
+
+    for (let turn = 0; turn < 9; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
+    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+
+    await mock.fireLifecycle("turn_start", {}, ctx);
+    const [reNudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(reNudge?.messages).toHaveLength(1);
+    expect(reNudge.messages[0].content).toContain("still empty several steps into this work");
+    expect(reNudge.messages[0].content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
+
+    cleanupStore(storePath);
+  });
+
+  it("does not let a rejected task_write reset the reminder clock", async () => {
+    const sessionId = `todo-reminder-failed-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+    await mock.createTask({ subject: "Open", description: "Desc" }, ctx);
+
+    for (let turn = 0; turn < 9; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
+
+    // Malformed create is rejected with a teaching error; it must NOT count as recent use.
+    const failed = await mock.executeTool("task_write", { operations: [{ action: "create", subject: "only subject" }] }, ctx);
+    expect(failed.content[0].text).toContain("task_write failed");
+
+    await mock.fireLifecycle("turn_start", {}, ctx);
+    const [reminder] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(reminder?.messages).toHaveLength(1);
+    expect(reminder.messages[0].content).toContain("#1 [pending] Open");
+
+    cleanupStore(storePath);
+  });
+
+  it("tightens the reminder interval to 5 turns under context pressure", async () => {
+    const sessionId = `todo-reminder-pressure-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+    await mock.createTask({ subject: "Open", description: "Desc" }, ctx);
+
+    const heavy = [{ role: "user", content: "x".repeat(200001) }];
+    for (let turn = 0; turn < 4; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
+    expect(await mock.fireLifecycle("context", { messages: heavy }, ctx)).toEqual([undefined]);
+
+    await mock.fireLifecycle("turn_start", {}, ctx);
+    const [reminder] = await mock.fireLifecycle("context", { messages: heavy }, ctx);
+    expect(reminder?.messages).toHaveLength(2);
+    expect(reminder.messages[1].content).toContain("#1 [pending] Open");
+
+    cleanupStore(storePath);
+  });
 });
