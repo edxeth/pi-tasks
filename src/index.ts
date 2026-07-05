@@ -185,6 +185,12 @@ function textResult(text: string) {
   return { content: [{ type: "text" as const, text }], details: undefined as any };
 }
 
+// Marks a failed task_write so the reminder clock can skip it via a structured signal
+// instead of brittle message-text matching (the tool API has no isError field to set).
+function failedTaskResult(text: string) {
+  return { content: [{ type: "text" as const, text }], details: { taskWriteFailed: true } as any };
+}
+
 function formatUpdateMessage(taskId: string, changedFields: string[], warnings: string[] = []) {
   let message = `Updated task #${taskId}`;
   if (changedFields.length > 0) message += ` ${changedFields.join(", ")}`;
@@ -257,15 +263,11 @@ function estimateContextChars(messages: readonly unknown[]): number {
   return total;
 }
 
-function isFailedTaskResult(event: { isError?: boolean; content?: unknown }): boolean {
+function isFailedTaskResult(event: { isError?: boolean; details?: unknown }): boolean {
+  // Framework validation failures carry isError:true; handler rejections carry the details marker
+  // (execute() returns normally, so isError is false for those).
   if (event.isError) return true;
-  const content = event.content;
-  const text = Array.isArray(content)
-    ? content.map((block) => (block && typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : "")).join("")
-    : typeof content === "string"
-      ? content
-      : "";
-  return text.startsWith("task_write failed") || text.startsWith('Validation failed for tool "task_write"');
+  return !!(event.details && typeof event.details === "object" && (event.details as { taskWriteFailed?: unknown }).taskWriteFailed === true);
 }
 
 function getTaskIcon(status: "pending" | "in_progress" | "completed") {
@@ -1084,7 +1086,7 @@ export default function (pi: ExtensionAPI) {
   const UPDATE_EXAMPLE = '{"operations":[{"action":"update","taskId":"1","status":"completed"}]}';
 
   function teachingError(message: string, expected: string) {
-    return textResult(`task_write failed: ${message}\nexpected: ${expected}`);
+    return failedTaskResult(`task_write failed: ${message}\nexpected: ${expected}`);
   }
 
   function normalizeTaskWriteParams(params: unknown): { operations?: unknown[]; error?: ReturnType<typeof textResult> } {
@@ -1173,7 +1175,7 @@ export default function (pi: ExtensionAPI) {
       if (converted.error) return Promise.resolve(converted.error);
       const operations = prepareBatchOperations(converted.operations ?? []);
       const result = store.write(operations as any);
-      if (!result.committed) return Promise.resolve(textResult(formatTaskWriteMessage(result)));
+      if (!result.committed) return Promise.resolve(failedTaskResult(formatTaskWriteMessage(result)));
       const visibleResult: TaskBatchResult = {
         ...result,
         operations: result.operations.map((operation) => {
