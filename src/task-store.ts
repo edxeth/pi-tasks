@@ -19,6 +19,27 @@ const HIGH_WATER_MARK_FILE = ".highwatermark";
 const LOCK_RETRY_MS = 50;
 const LOCK_MAX_RETRIES = 100;
 
+function isTaskStatus(status: unknown): status is TaskStatus {
+  return status === "pending" || status === "in_progress" || status === "completed";
+}
+
+function isTaskUpdateStatus(status: unknown): status is TaskStatus | "deleted" {
+  return isTaskStatus(status) || status === "deleted";
+}
+
+function getInvalidTaskStatusError(status: unknown): string | undefined {
+  if (typeof status === "string") return `invalid task status: ${status}`;
+  return `invalid task status: ${JSON.stringify(status)}`;
+}
+
+function assertTaskStatus(status: unknown): asserts status is TaskStatus {
+  if (!isTaskStatus(status)) throw new Error(getInvalidTaskStatusError(status));
+}
+
+function assertTaskUpdateStatus(status: unknown): asserts status is TaskStatus | "deleted" {
+  if (!isTaskUpdateStatus(status)) throw new Error(getInvalidTaskStatusError(status));
+}
+
 type TaskUpdateFields = {
   status?: TaskStatus | "deleted";
   subject?: string;
@@ -464,6 +485,7 @@ export class TaskStore {
   }
 
   create(subject: string, description: string, status?: TaskStatus, activeForm?: string, metadata?: Record<string, any>): Task {
+    if (status !== undefined) assertTaskStatus(status);
     return this.withLock(() => {
       const todos = cloneTasks(this.todos);
       const { todo, nextId } = this.createInState(todos, this.nextId, subject, description, status, activeForm, metadata);
@@ -489,6 +511,7 @@ export class TaskStore {
   }
 
   update(id: string, fields: TaskUpdateFields): { todo: Task | undefined; changedFields: string[]; warnings: string[] } {
+    if (fields.status !== undefined) assertTaskUpdateStatus(fields.status);
     return this.withLock(() => {
       const todos = cloneTasks(this.todos);
       const result = this.updateInState(todos, id, fields);
@@ -508,6 +531,13 @@ export class TaskStore {
         const operationIndex = index + 1;
 
         if (operation.type === "create") {
+          if (operation.status !== undefined && !isTaskStatus(operation.status)) {
+            return {
+              committed: false,
+              operations: [],
+              error: `operation ${operationIndex} has ${getInvalidTaskStatusError(operation.status)}`,
+            };
+          }
           const created = this.createInState(
             todos,
             nextId,
@@ -529,6 +559,13 @@ export class TaskStore {
         }
 
         if (operation.type === "update") {
+          if (operation.status !== undefined && !isTaskUpdateStatus(operation.status)) {
+            return {
+              committed: false,
+              operations: [],
+              error: `operation ${operationIndex} has ${getInvalidTaskStatusError(operation.status)}`,
+            };
+          }
           const { taskId, type: _type, ...fields } = operation;
           const updated = this.updateInState(todos, taskId, fields);
           if (!updated.todo && updated.changedFields.length === 0) {

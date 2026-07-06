@@ -5,6 +5,7 @@
     "": {
       "name": "pi-tasks",
       "devDependencies": {
+        "@earendil-works/pi-ai": "^0.75.4",
         "@earendil-works/pi-coding-agent": "^0.75.4",
         "@earendil-works/pi-tui": "^0.75.4",
         "@types/node": "^20.0.0",
@@ -13,6 +14,7 @@
         "vitest": "^4.0.18",
       },
       "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
         "@earendil-works/pi-coding-agent": "*",
         "@earendil-works/pi-tui": "*",
         "typebox": "*",

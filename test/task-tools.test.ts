@@ -375,6 +375,25 @@ describe("pi-tasks extension", () => {
     }
   });
 
+  it("uses flat enum schemas for task_write action and status guidance", () => {
+    const mock = mockPi();
+    initExtension(mock.pi as any);
+
+    const writeTool = mock.tools.get("task_write");
+    const operationSchema = writeTool.parameters.properties.operations.items;
+
+    expect(operationSchema.properties.action).toMatchObject({
+      type: "string",
+      enum: ["create", "update", "delete"],
+    });
+    expect(operationSchema.properties.status).toMatchObject({
+      type: "string",
+      enum: ["pending", "in_progress", "completed", "deleted"],
+    });
+    expect(JSON.stringify(operationSchema)).not.toContain("anyOf");
+    expect(JSON.stringify(operationSchema)).not.toContain("const");
+  });
+
   it("states every always-on rule sentence exactly once across policy, descriptions, and snippets", async () => {
     const mock = mockPi();
     const ctx = mockCtx(`guidance-unique-${Date.now()}`);
@@ -770,8 +789,10 @@ describe("pi-tasks extension", () => {
     const missingCreateFields = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "create", subject: "Only subject" }] }, ctx);
     const missingBothFields = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "create", status: "pending" }] }, ctx);
     const missingTaskId = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "update", status: "completed" }] }, ctx);
-    const unknownAction = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
-    const invalidStatus = await mock.executeToolThroughValidation("task_write", { operations: [{ action: "update", taskId: "1", status: "done" }] }, ctx);
+    const unknownAction = mock.executeToolThroughValidation("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
+    const invalidStatus = mock.executeToolThroughValidation("task_write", { operations: [{ action: "update", taskId: "1", status: "done" }] }, ctx);
+    const directUnknownAction = await mock.executeTool("task_write", { operations: [{ action: "finish", taskId: "1" }] }, ctx);
+    const directInvalidStatus = await mock.executeTool("task_write", { operations: [{ action: "update", taskId: "1", status: "done" }] }, ctx);
     const emptyOps = await mock.executeToolThroughValidation("task_write", { operations: [] }, ctx);
 
     expect(emptyOps.content[0].text).toContain("operations must be a non-empty array");
@@ -781,10 +802,12 @@ describe("pi-tasks extension", () => {
     expect(missingCreateFields.content[0].text).toContain('expected: {"operations":[{"action":"create","subject":"...","description":"..."}]}');
     expect(missingTaskId.content[0].text).toContain("update requires taskId");
     expect(missingTaskId.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
-    expect(unknownAction.content[0].text).toContain("unknown action");
-    expect(unknownAction.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
-    expect(invalidStatus.content[0].text).toContain("invalid status");
-    expect(invalidStatus.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    await expect(unknownAction).rejects.toThrow("operations.0.action: must be equal to one of the allowed values");
+    await expect(invalidStatus).rejects.toThrow("operations.0.status: must be equal to one of the allowed values");
+    expect(directUnknownAction.content[0].text).toContain("unknown action");
+    expect(directUnknownAction.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
+    expect(directInvalidStatus.content[0].text).toContain("invalid status");
+    expect(directInvalidStatus.content[0].text).toContain('expected: {"operations":[{"action":"update","taskId":"1","status":"completed"}]}');
     expect(existsSync(join(storePath, "1.json"))).toBe(false);
 
     cleanupStore(storePath);

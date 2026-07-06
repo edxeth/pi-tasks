@@ -28,6 +28,18 @@ describe("TaskStore (in-memory)", () => {
     expect(second.status).toBe("completed");
   });
 
+  it("rejects invalid initial statuses", () => {
+    expect(() => store.create("Bad", "Description", "done" as any)).toThrow("invalid task status: done");
+    expect(store.list()).toEqual([]);
+  });
+
+  it("rejects invalid update statuses", () => {
+    store.create("Task", "Desc");
+
+    expect(() => store.update("1", { status: "done" as any })).toThrow("invalid task status: done");
+    expect(store.get("1")?.status).toBe("pending");
+  });
+
   it("updates multiple fields", () => {
     store.create("Task", "Desc");
     const result = store.update("1", {
@@ -135,6 +147,24 @@ describe("TaskStore (in-memory)", () => {
       committed: false,
       operations: [],
       error: "operation 2 update task #99 not found",
+    });
+    expect(store.list().map((todo) => `${todo.id}:${todo.subject}:${todo.status}`)).toEqual([
+      "1:Existing:pending",
+    ]);
+  });
+
+  it("does not partially commit task_write when an operation has an invalid status", () => {
+    store.create("Existing", "Desc");
+
+    const result = store.write([
+      { type: "create", subject: "No commit", description: "Desc" },
+      { type: "update", taskId: "1", status: "done" as any },
+    ]);
+
+    expect(result).toEqual({
+      committed: false,
+      operations: [],
+      error: "operation 2 has invalid task status: done",
     });
     expect(store.list().map((todo) => `${todo.id}:${todo.subject}:${todo.status}`)).toEqual([
       "1:Existing:pending",

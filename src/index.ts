@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -156,11 +157,11 @@ const metadataSchema = Type.Record(Type.String(), Type.Any(), {
 });
 
 const taskWriteOperationSchema = Type.Object({
-  action: Type.Optional(Type.String({ description: "Required task write action: create, update, or delete" })),
+  action: Type.Optional(StringEnum(["create", "update", "delete"], { description: "Required task write action: create, update, or delete" })),
   taskId: Type.Optional(Type.String({ description: "The ID of the task to update or delete" })),
   subject: Type.Optional(Type.String({ description: "Task subject (required for create)" })),
   description: Type.Optional(Type.String({ description: "Task description (required for create)" })),
-  status: Type.Optional(Type.String({ description: "Task status: pending, in_progress, completed, or deleted" })),
+  status: Type.Optional(StringEnum(["pending", "in_progress", "completed", "deleted"], { description: "Task status: pending, in_progress, completed, or deleted" })),
   activeForm: Type.Optional(Type.String({ description: "Present continuous form shown while in_progress" })),
   metadata: Type.Optional(metadataSchema),
   addBlocks: Type.Optional(Type.Array(Type.String(), { description: "Update only: task IDs this task blocks" })),
