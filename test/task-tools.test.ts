@@ -343,7 +343,7 @@ describe("pi-tasks extension", () => {
     });
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
+      "1 open · 0 completed · Ctrl+Alt+T to cycle",
       "▶ #1 Ship rename · 0s",
     ]));
 
@@ -930,7 +930,7 @@ describe("pi-tasks extension", () => {
 
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "4 open · 1 completed · 5 total · Ctrl+Alt+T to cycle",
+      "4 open · 1 completed (0s) · Ctrl+Alt+T to cycle",
       "○ #2 Blocked pending [blocked by #4]",
       "▶ #3 In progress · 0s",
       "○ #4 Open blocker",
@@ -965,7 +965,7 @@ describe("pi-tasks extension", () => {
 
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
-        "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
+        "2 open · 18 completed (0s) · Ctrl+Alt+T to cycle",
         "▶ #19 Current · 0s",
         "○ #20 Next",
         "✓ #18 Old done 18 · 0s",
@@ -1009,7 +1009,7 @@ describe("pi-tasks extension", () => {
 
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "[dim:1 open · 1 completed · 2 total] · Ctrl+Alt+T to cycle",
+      "[dim:1 open · 1 completed (0s)] · Ctrl+Alt+T to cycle",
       "○ #2 Open title",
       "[dim:✓ #1 [strike:[dim:Done title]] [dim:· 0s]]",
     ]));
@@ -1042,7 +1042,7 @@ describe("pi-tasks extension", () => {
 
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
-        "2 open · 18 completed · 20 total · Ctrl+Alt+T to cycle",
+        "2 open · 18 completed (0s) · Ctrl+Alt+T to cycle",
         "▶ #19 Current · 0s",
         "○ #20 Next",
         "✓ #18 Old done 18 · 0s",
@@ -1074,14 +1074,14 @@ describe("pi-tasks extension", () => {
 
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "1 open · 1 completed · 2 total · Ctrl+Alt+T to cycle",
+      "1 open · 1 completed (0s) · Ctrl+Alt+T to cycle",
       "○ #2 Open",
     ]));
 
     await mock.executeShortcut("ctrl+alt+t", ctx);
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "1 open · 1 completed · 2 total · Ctrl+Alt+T to cycle",
+      "1 open · 1 completed (0s) · Ctrl+Alt+T to cycle",
       "○ #2 Open",
       "✓ #1 Done · 0s",
     ]));
@@ -1256,22 +1256,33 @@ describe("pi-tasks extension", () => {
 
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
-        "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
+        "1 open · 0 completed · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 0s",
       ]));
 
       vi.advanceTimersByTime(2_000);
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
-        "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
+        "1 open · 0 completed · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 2s",
       ]));
 
       await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 18 } } }, ctx);
       expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
         "Tasks",
-        "1 open · 0 completed · 1 total · Ctrl+Alt+T to cycle",
+        "1 open · 0 completed · Ctrl+Alt+T to cycle",
         "▶ #1 Live · 2s · 18 tokens",
+      ]));
+
+      vi.advanceTimersByTime(36_000);
+      await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
+      await mock.createTask( { subject: "Second", description: "Desc", status: "in_progress" }, ctx);
+      vi.advanceTimersByTime(62_000);
+      await mock.updateTask( { taskId: "2", status: "completed" }, ctx);
+      expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
+        "Tasks",
+        "0 open · 2 completed (1m 40s) · Ctrl+Alt+T to cycle",
+        "No open tasks",
       ]));
     } finally {
       cleanupStore(storePath);
@@ -1311,7 +1322,7 @@ describe("pi-tasks extension", () => {
     ].join("\n"));
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "2 open · 0 completed · 2 total · Ctrl+Alt+T to cycle",
+      "2 open · 0 completed · Ctrl+Alt+T to cycle",
       "○ #2 Open",
       "○ #3 Also open",
     ]));
@@ -1341,7 +1352,7 @@ describe("pi-tasks extension", () => {
     expect(existsSync(join(storePath, "1.json"))).toBe(true);
     expect(ctx.widgets.get("tasks")).toEqual(widgetLines([
       "Tasks",
-      "0 open · 1 completed · 1 total · Ctrl+Alt+T to cycle",
+      "0 open · 1 completed (0s) · Ctrl+Alt+T to cycle",
       "No open tasks",
     ]));
 

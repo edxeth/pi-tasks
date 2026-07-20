@@ -756,8 +756,10 @@ export default function (pi: ExtensionAPI) {
     const todos = sortTasksForAllWidgetView(storeTodos);
     const openTodos = sortTasksForOpenView(storeTodos);
     const completedTodos = todos.filter((todo) => todo.status === "completed");
+    const completedRuntimeMs = completedTodos.reduce((total, todo) => total + (getTaskRuntimeMs(todo) ?? 0), 0);
+    const completedSummary = `${completedTodos.length} completed${completedTodos.length > 0 ? ` (${formatDuration(completedRuntimeMs)})` : ""}`;
     const lines: string[] = [];
-    const counts = `${openTodos.length} open · ${completedTodos.length} completed · ${todos.length} total`;
+    const counts = `${openTodos.length} open · ${completedSummary}`;
 
     lines.push(theme.fg("accent", "Tasks"));
     lines.push(`${theme.fg("muted", counts)}${theme.fg("dim", " · Ctrl+Alt+T to cycle")}`);
