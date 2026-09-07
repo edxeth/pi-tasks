@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/f0229862-417b-4ef2-9486-2b8736b7ce87
 ## What you get
 
 - 2 model-callable tools: `task_write` and `task_list`
-- 2 interactive commands: `/tasks` and `/tasks-clear-completed`
+- 2 interactive commands: `/tasks` and `/tasks-clean`
 - `Ctrl+Alt+T` to cycle the widget through Open, All, and Hidden
 - per-session durable storage under `~/.pi/tasks/`
 - branch-aware restore when you move around the session tree
@@ -57,7 +57,7 @@ pi install git:github.com/edxeth/pi-tasks
 ### UI
 
 - `/tasks` opens or switches the task widget view (`on`, `open`, `all`, `hide`, `cycle`, `off`)
-- `/tasks-clear-completed` deletes completed tasks after confirmation
+- `/tasks-clean` deletes completed tasks after confirmation and leaves an expandable, themed checklist in the transcript without adding model-context tokens.
 - `Ctrl+Alt+T` cycles widget mode: Open → All → Hidden
 
 The widget is for interactive sessions. The tools work in any mode.

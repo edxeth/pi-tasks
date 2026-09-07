@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateToolArguments } from "../node_modules/@earendil-works/pi-ai/dist/utils/validation.js";
 import initExtension from "../src/index.js";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { CustomEntryComponent } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/custom-entry.js";
+import { initTheme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { getSessionTaskDirPath } from "../src/task-store.js";
 
 function cleanupStore(storePath: string) {
@@ -66,6 +69,7 @@ function mockCtx(
       getSessionId: () => sessionId,
       getSessionFile: () => options?.sessionFile,
       getLeafId: () => leafId,
+      getBranch: () => [],
     },
     ui: {
       notify(message: string, level: string) {
@@ -113,6 +117,8 @@ function mockCtx(
 }
 
 function mockPi() {
+  const entries: Array<{ customType: string; data: unknown }> = [];
+  const entryRenderers = new Map();
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const shortcuts = new Map<string, any>();
@@ -120,6 +126,12 @@ function mockPi() {
   const sentMessages: Array<{ message: any; options: any }> = [];
 
   const pi = {
+    registerEntryRenderer(name: string, renderer: unknown) {
+      entryRenderers.set(name, renderer);
+    },
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ customType, data });
+    },
     registerTool(def: any) {
       tools.set(def.name, def);
     },
@@ -150,6 +162,8 @@ function mockPi() {
     commands,
     shortcuts,
     sentMessages,
+    entries,
+    entryRenderers,
     async fireLifecycle(event: string, ...args: any[]): Promise<any[]> {
       const results: any[] = [];
       for (const handler of lifecycleHandlers.get(event) ?? []) {
@@ -284,7 +298,7 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
 
     expect([...mock.tools.keys()].sort()).toEqual(["task_list", "task_write"]);
-    expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clear-completed"]);
+    expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clean"]);
   });
 
   it("injects a hidden task workflow policy into the system prompt", async () => {
@@ -565,10 +579,10 @@ describe("pi-tasks extension", () => {
     const missingUpdate = await mock.updateTask( { taskId: "99", status: "completed" }, ctx);
     const warned = await mock.updateTask( { taskId: "1", addBlockedBy: ["1", "999"] }, ctx);
 
-    expect(created.content[0].text).toBe("Operation 1: Task #1 created successfully: One");
+    expect(created.content[0].text).toBe("Created #1: One");
     expect(missingGet.content[0].text).toBe("Task #99 not found");
     expect(missingUpdate.content[0].text).toBe("task_write failed: operation 1 update task #99 not found\nNo changes were committed.");
-    expect(warned.content[0].text).toBe("Operation 1: Updated task #1 blockedBy\nWarnings: operation 1: #1 blocks itself; operation 1: #999 does not exist");
+    expect(warned.content[0].text).toBe("Updated #1: blockedBy\nWarning #1: #1 blocks itself\nWarning #1: #999 does not exist");
 
     cleanupStore(storePath);
   });
@@ -723,7 +737,7 @@ describe("pi-tasks extension", () => {
     await mock.updateTask( { taskId: "1", status: "deleted" }, ctx);
     const created = await mock.createTask( { subject: "Three", description: "Desc" }, ctx);
 
-    expect(created.content[0].text).toContain("Task #3 created successfully: Three");
+    expect(created.content[0].text).toContain("Created #3: Three");
     expect(existsSync(join(storePath, "1.json"))).toBe(false);
     expect(existsSync(join(storePath, "3.json"))).toBe(true);
 
@@ -755,10 +769,10 @@ describe("pi-tasks extension", () => {
     );
 
     expect(result.content[0].text).toBe([
-      "Operation 1: Task #2 created successfully: Batch create",
-      "Operation 2: Updated task #1 status",
-      "Operation 3: Updated task #2 blockedBy",
-      "Warnings: operation 3: #999 does not exist",
+      "Created #2: Batch create",
+      "Updated #1: status",
+      "Updated #2: blockedBy",
+      "Warning #2: #999 does not exist",
     ].join("\n"));
     expect(readTaskFile(storePath, "1").status).toBe("in_progress");
     expect(readTaskFile(storePath, "2")).toMatchObject({
@@ -814,7 +828,7 @@ describe("pi-tasks extension", () => {
 
     const result = await mock.executeToolThroughValidation("task_write", { action: "create", subject: "Flat", description: "Desc" }, ctx);
 
-    expect(result.content[0].text).toBe("Operation 1: Task #1 created successfully: Flat");
+    expect(result.content[0].text).toBe("Created #1: Flat");
     expect(readTaskFile(storePath, "1").subject).toBe("Flat");
 
     cleanupStore(storePath);
@@ -1984,7 +1998,7 @@ describe("pi-tasks extension", () => {
     await mock.createTask( { subject: "Also open", description: "Desc" }, ctx);
     await mock.updateTask( { taskId: "1", status: "completed" }, ctx);
 
-    await mock.executeCommand("tasks-clear-completed", "", ctx);
+    await mock.executeCommand("tasks-clean", "", ctx);
     expect(ctx.confirmCalls).toEqual([
       { title: "Clear completed tasks?", message: "Permanently delete 1 completed task?" },
     ]);
@@ -1994,7 +2008,7 @@ describe("pi-tasks extension", () => {
       "#3 [pending] Also open",
     ].join("\n"));
 
-    await mock.executeCommand("tasks-clear-completed", "", ctx);
+    await mock.executeCommand("tasks-clean", "", ctx);
     expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe([
       "#2 [pending] Open",
       "#3 [pending] Also open",
@@ -2007,6 +2021,87 @@ describe("pi-tasks extension", () => {
     ]));
 
     cleanupStore(storePath);
+  });
+
+  it("tasks-clean saves an expandable UI-only checklist of cleared tasks", async () => {
+    const sessionId = `task-clean-receipt-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId, true);
+    initExtension(mock.pi as any);
+    try {
+      await mock.executeTool("task_write", { operations: [
+        ...Array.from({ length: 14 }, (_, index) => ({
+          action: "create", subject: `Finished ${index + 1}`, description: `Details ${index + 1}`, status: "completed",
+        })),
+        { action: "create", subject: "Keep working", description: "Do not remove", status: "in_progress" },
+      ] }, ctx);
+      await mock.executeCommand("tasks-clean", "", ctx);
+      expect(mock.entries).toHaveLength(1);
+      expect(mock.sentMessages).toEqual([]);
+      expect(ctx.notifications).toEqual([]);
+      expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toContain("#15 [in_progress] Keep working");
+      expect(existsSync(join(storePath, "1.json"))).toBe(false);
+
+      const saved = JSON.parse(JSON.stringify(mock.entries[0]));
+      const reloaded = mockPi();
+      initExtension(reloaded.pi as any);
+      initTheme("dark", false);
+      const component = new CustomEntryComponent(
+        { ...saved, type: "custom", id: "receipt", parentId: null, timestamp: new Date().toISOString() },
+        reloaded.entryRenderers.get(saved.customType),
+      );
+      for (const name of ["dark", "light"]) {
+        initTheme(name, false);
+        component.invalidate();
+        component.setExpanded(false);
+        const ansi = component.render(100).join("\n");
+        const text = stripTerminalSequences(ansi);
+        expect(ansi).not.toBe(text);
+        expect(text).toContain("Cleared 14 completed tasks");
+        expect(text).toContain("× #1 Finished 1");
+        expect(text).toContain("expand 4 more tasks");
+        expect(text).not.toContain("Finished 14");
+        expect(text).not.toContain("Keep working");
+        expect(text).not.toContain("Details 1");
+        component.setExpanded(true);
+        const expanded = stripTerminalSequences(component.render(100).join("\n"));
+        expect(expanded).toContain("× #14 Finished 14");
+        expect(expanded).toContain("description: Details 14");
+        for (const line of component.render(24)) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+      }
+    } finally {
+      await mock.fireLifecycle("session_shutdown", {}, ctx);
+      cleanupStore(storePath);
+    }
+  });
+
+  it("keeps cleanup cancellation and empty states out of the transcript", async () => {
+    const sessionId = `task-clean-empty-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId, true, { confirmResponses: [false, true] });
+    initExtension(mock.pi as any);
+    try {
+      await mock.executeCommand("tasks-clean", "", ctx);
+      expect(ctx.confirmCalls).toEqual([]);
+      expect(ctx.notifications.at(-1)?.message).toBe("No completed tasks to clear");
+      await mock.createTask({ subject: "Done", description: "Desc", status: "completed" }, ctx);
+      await mock.executeCommand("tasks-clean", "", ctx);
+      expect(ctx.notifications.at(-1)?.message).toBe("Clear completed cancelled");
+      expect(mock.entries).toEqual([]);
+      expect(existsSync(join(storePath, "1.json"))).toBe(true);
+      await mock.executeCommand("tasks-clean", "", ctx);
+      expect(mock.entries).toHaveLength(1);
+      const receipt = mock.entries[0];
+      const output = mock.entryRenderers.get(receipt.customType)({ data: receipt.data }, { expanded: false }, ctx.ui.theme).render(100).join("\n");
+      expect(output).toContain("Cleared 1 completed task");
+      expect(output).not.toMatch(/expand/i);
+      expect(existsSync(join(storePath, "1.json"))).toBe(false);
+      expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe("No tasks found");
+    } finally {
+      cleanupStore(storePath);
+    }
   });
 
   it("keeps completed tasks on disk across idle turns and session resets", async () => {

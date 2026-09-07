@@ -697,15 +697,13 @@ export class TaskStore {
     });
   }
 
-  clearCompleted(): number {
+  /** Delete completed tasks and return their snapshots from the same locked transaction. */
+  clearCompleted(): Task[] {
     return this.withLock(() => {
       const todos = cloneTasks(this.todos);
-      const completedIds = new Set(
-        Array.from(todos.values())
-          .filter((todo) => todo.status === "completed")
-          .map((todo) => todo.id),
-      );
-      if (completedIds.size === 0) return 0;
+      const completed = Array.from(todos.values()).filter((todo) => todo.status === "completed");
+      const completedIds = new Set(completed.map((todo) => todo.id));
+      if (completedIds.size === 0) return [];
 
       for (const id of completedIds) {
         todos.delete(id);
@@ -721,7 +719,7 @@ export class TaskStore {
       }
 
       this.commitState(todos, this.nextId);
-      return completedIds.size;
+      return completed;
     });
   }
 

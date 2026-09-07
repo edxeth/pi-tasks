@@ -167,8 +167,9 @@ describe("TaskStore (in-memory)", () => {
     store.create("Open", "Desc");
     store.update("1", { status: "completed" });
 
-    expect(store.clearCompleted()).toBe(1);
+    expect(store.clearCompleted()).toMatchObject([{ id: "1", subject: "Done", status: "completed" }]);
     expect(store.list().map((todo) => todo.id)).toEqual(["2"]);
+    expect(store.clearCompleted()).toEqual([]);
   });
 
   it("keeps warnings for cycles, self refs, and dangling refs", () => {
@@ -291,6 +292,21 @@ describe("TaskStore (file-backed)", () => {
 
     const raw = JSON.parse(readFileSync(join(storePath, "2.json"), "utf-8"));
     expect(raw.status).toBe("completed");
+  });
+
+  it("returns the actual cleared snapshots after another store changes task status", () => {
+    const first = new TaskStore(storePath);
+    first.create("Reopened", "Keep", "completed");
+    first.create("Finished elsewhere", "Remove");
+    first.update("1", { addBlockedBy: ["2"] });
+    const second = new TaskStore(storePath);
+    second.update("1", { status: "pending" });
+    second.update("2", { status: "completed", subject: "Latest title" });
+
+    expect(first.clearCompleted()).toMatchObject([{ id: "2", subject: "Latest title", status: "completed" }]);
+    expect(existsSync(join(storePath, "2.json"))).toBe(false);
+    expect(new TaskStore(storePath).list()).toMatchObject([{ id: "1", status: "pending", blockedBy: [] }]);
+    expect(first.clearCompleted()).toEqual([]);
   });
 
   it("initializes metadata when updating a legacy task without metadata", () => {

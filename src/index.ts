@@ -16,6 +16,17 @@ import {
   TaskStore,
 } from "./task-store.js";
 import type { Task } from "./task-types.js";
+import { restoreTaskWriteHistory } from "./task-legacy.js";
+import {
+  formatTaskWriteContent,
+  makeWriteSnapshot,
+  renderTaskCleanup,
+  renderTaskListCall,
+  renderTaskListResult,
+  renderTaskWriteCall,
+  renderTaskWriteResult,
+  type TaskViewRow,
+} from "./task-render.js";
 
 const TASK_MANAGEMENT_TOOL_NAMES = new Set(["task_write"]);
 const TASK_TELEMETRY_EXCLUDED_TOOL_NAMES = new Set([...TASK_MANAGEMENT_TOOL_NAMES, "task_list"]);
@@ -207,44 +218,14 @@ function debug(...args: unknown[]) {
   if (DEBUG) console.error("[pi-tasks]", ...args);
 }
 
-function textResult(text: string) {
-  return { content: [{ type: "text" as const, text }], details: undefined as any };
+function textResult(text: string, details?: unknown) {
+  return { content: [{ type: "text" as const, text }], details };
 }
 
 // Marks a failed task_write so the reminder clock can skip it via a structured signal
 // instead of brittle message-text matching (the tool API has no isError field to set).
-function failedTaskResult(text: string) {
-  return { content: [{ type: "text" as const, text }], details: { taskWriteFailed: true } as any };
-}
-
-function formatUpdateMessage(taskId: string, changedFields: string[], warnings: string[] = []) {
-  let message = `Updated task #${taskId}`;
-  if (changedFields.length > 0) message += ` ${changedFields.join(", ")}`;
-  if (warnings.length > 0) message += ` (warning: ${warnings.join("; ")})`;
-  return message;
-}
-
-function formatTaskWriteMessage(result: TaskBatchResult) {
-  if (!result.committed) {
-    return `task_write failed: ${result.error}\nNo changes were committed.`;
-  }
-
-  const lines = result.operations.map((operation) => {
-    if (operation.type === "create") {
-      return `Operation ${operation.index}: Task #${operation.taskId} created successfully: ${operation.subject}`;
-    }
-    if (operation.type === "update") {
-      return `Operation ${operation.index}: ${formatUpdateMessage(operation.taskId, operation.changedFields)}`;
-    }
-    return `Operation ${operation.index}: Updated task #${operation.taskId} deleted`;
-  });
-
-  const warnings = result.operations.flatMap((operation) =>
-    operation.warnings.map((warning) => `operation ${operation.index}: ${warning}`),
-  );
-  if (warnings.length > 0) lines.push(`Warnings: ${warnings.join("; ")}`);
-
-  return lines.join("\n");
+function failedTaskResult(text: string, details?: Record<string, unknown>) {
+  return { content: [{ type: "text" as const, text }], details: { ...details, taskWriteFailed: true } };
 }
 
 function getOpenBlockers(store: TaskStore, blockedBy: string[]): string[] {
@@ -558,6 +539,17 @@ function getTaskDetailLines(todo: Task, store: TaskStore): string[] {
   return lines;
 }
 
+function toViewRow(todo: Task, taskStore: TaskStore): TaskViewRow {
+  const openBlockers = getOpenBlockers(taskStore, todo.blockedBy);
+  return {
+    id: todo.id,
+    subject: todo.subject,
+    status: todo.status,
+    detailLines: getTaskDetailLines(todo, taskStore).slice(1),
+    blockedBy: openBlockers.length > 0 ? openBlockers : undefined,
+  };
+}
+
 function chooseMostRecentInProgressTask(todos: Task[]): Task | undefined {
   return [...todos]
     .filter((todo) => todo.status === "in_progress")
@@ -583,6 +575,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   let store = new TaskStore();
+  let historicalWrites: ReturnType<typeof restoreTaskWriteHistory> = new Map();
   let storeScopeKey: string | undefined;
   let storeLeafId: string | null | undefined;
   let currentTurn = 0;
@@ -964,6 +957,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function resetSessionState(ctx: ExtensionContext, options?: { previousSessionFile?: string }) {
+    historicalWrites = restoreTaskWriteHistory(ctx.sessionManager.getBranch());
     stopWidgetTicker();
     widgetRegistered = false;
     widgetTui = undefined;
@@ -1145,11 +1139,13 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("tasks-clear-completed", {
+  pi.registerEntryRenderer("tasks-cleaned", renderTaskCleanup);
+
+  pi.registerCommand("tasks-clean", {
     description: "Clear completed tasks after confirmation",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) {
-        ctx.ui.notify("/tasks-clear-completed requires interactive mode", "error");
+        ctx.ui.notify("/tasks-clean requires interactive mode", "error");
         return;
       }
 
@@ -1172,7 +1168,19 @@ export default function (pi: ExtensionAPI) {
       const cleared = store.clearCompleted();
       store.deleteFileIfEmpty();
       updateTaskWidget(ctx);
-      ctx.ui.notify(`Cleared ${cleared} completed task${cleared === 1 ? "" : "s"}`, "info");
+      if (cleared.length === 0) {
+        ctx.ui.notify("No completed tasks to clear", "info");
+        return;
+      }
+      const rows = cleared.sort(compareTaskIds).map((todo): TaskViewRow => {
+        const row = toViewRow(todo, store);
+        return {
+          ...row,
+          status: "deleted",
+          detailLines: row.detailLines?.map((line) => line.startsWith("status:") ? "status: deleted" : line),
+        };
+      });
+      pi.appendEntry("tasks-cleaned", { rows });
     },
   });
 
@@ -1209,7 +1217,8 @@ export default function (pi: ExtensionAPI) {
   const UPDATE_EXAMPLE = '{"operations":[{"action":"update","taskId":"1","status":"completed"}]}';
 
   function teachingError(message: string, expected: string) {
-    return failedTaskResult(`task_write failed: ${message}\nexpected: ${expected}`);
+    const text = `task_write failed: ${message}\nexpected: ${expected}`;
+    return failedTaskResult(text, { kind: "task_write", committed: false, error: text, rows: [], warnings: [], opCount: 0 });
   }
 
   function prepareTaskWriteArguments(params: unknown) {
@@ -1324,8 +1333,26 @@ export default function (pi: ExtensionAPI) {
       const converted = toTaskBatchOperations(normalized.operations ?? []);
       if (converted.error) return Promise.resolve(converted.error);
       const operations = prepareBatchOperations(converted.operations ?? []);
+      const before = new Map<string, TaskViewRow>();
+      for (const operation of operations) {
+        if (operation.type === "create") continue;
+        if (before.has(operation.taskId)) continue;
+        const existing = store.get(operation.taskId);
+        if (existing) before.set(operation.taskId, toViewRow(existing, store));
+      }
       const result = store.write(operations as any);
-      if (!result.committed) return Promise.resolve(failedTaskResult(formatTaskWriteMessage(result)));
+      if (!result.committed) {
+        return Promise.resolve(
+          failedTaskResult(formatTaskWriteContent(result, before), {
+            kind: "task_write",
+            committed: false,
+            error: result.error,
+            rows: [],
+            warnings: [],
+            opCount: operations.length,
+          }),
+        );
+      }
       const visibleResult: TaskBatchResult = {
         ...result,
         operations: result.operations.map((operation) => {
@@ -1341,8 +1368,18 @@ export default function (pi: ExtensionAPI) {
       if (operations.some((operation) => operation.type === "delete" || (operation.type === "update" && operation.status === "deleted"))) {
         store.deleteFileIfEmpty();
       }
+      const after = new Map<string, TaskViewRow>();
+      for (const operation of visibleResult.operations) {
+        const todo = store.get(operation.taskId);
+        if (todo) after.set(operation.taskId, toViewRow(todo, store));
+      }
+      const snapshot = makeWriteSnapshot(visibleResult, before, after);
       updateTaskWidget(ctx);
-      return Promise.resolve(textResult(formatTaskWriteMessage(visibleResult)));
+      return Promise.resolve(textResult(formatTaskWriteContent(visibleResult, before), snapshot));
+    },
+    renderCall: renderTaskWriteCall,
+    renderResult(result, options, theme, context) {
+      return renderTaskWriteResult(result, options, theme, context, historicalWrites.get(context.toolCallId));
     },
   });
 
@@ -1358,12 +1395,36 @@ export default function (pi: ExtensionAPI) {
       prepareStore(ctx);
       if (params.taskId) {
         const todo = store.get(params.taskId);
-        if (!todo) return Promise.resolve(textResult(`Task #${params.taskId} not found`));
-        return Promise.resolve(textResult([`Task #${todo.id}: ${todo.subject}`, ...getTaskDetailLines(todo, store).slice(1)].join("\n")));
+        if (!todo) {
+          return Promise.resolve(
+            textResult(`Task #${params.taskId} not found`, {
+              kind: "task_list",
+              taskId: params.taskId,
+              notFound: true,
+              rows: [],
+            }),
+          );
+        }
+        return Promise.resolve(
+          textResult([`Task #${todo.id}: ${todo.subject}`, ...getTaskDetailLines(todo, store).slice(1)].join("\n"), {
+            kind: "task_list",
+            taskId: todo.id,
+            rows: [toViewRow(todo, store)],
+          }),
+        );
       }
       const todos = sortTasksForAllView(store.list());
-      if (todos.length === 0) return Promise.resolve(textResult("No tasks found"));
-      return Promise.resolve(textResult(todos.map((todo) => formatTaskLine(todo, store)).join("\n")));
+      if (todos.length === 0) {
+        return Promise.resolve(textResult("No tasks found", { kind: "task_list", rows: [] }));
+      }
+      return Promise.resolve(
+        textResult(todos.map((todo) => formatTaskLine(todo, store)).join("\n"), {
+          kind: "task_list",
+          rows: todos.map((todo) => toViewRow(todo, store)),
+        }),
+      );
     },
+    renderCall: renderTaskListCall,
+    renderResult: renderTaskListResult,
   });
 }
