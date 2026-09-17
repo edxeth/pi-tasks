@@ -584,9 +584,10 @@ export default function (pi: ExtensionAPI) {
   let emptyListNudgeShown = false;
   let widgetView: TaskWidgetView = readPersistedTaskWidgetView();
   let offPending = false;
+  // Telemetry remains single-owner; timer membership is tracked separately below.
   let activeTaskId: string | undefined;
   let agentSpanSince: number | undefined;
-  let agentSpanTaskId: string | undefined;
+  let agentSpanTaskSince = new Map<string, number>();
   let widgetCtx: ExtensionContext | undefined;
   let widgetTicker: ReturnType<typeof setInterval> | undefined;
   let widgetRegistered = false;
@@ -711,11 +712,11 @@ export default function (pi: ExtensionAPI) {
 
   // Agent-active time: an agent_start..agent_end span covers one agent loop run
   // (LLM streaming, tool runs, subagent tool calls). Gaps between runs — user idle,
-  // auto-compaction, retry backoff — do not count. The open span accrues to the task
-  // currently in progress; when the active task changes mid-run (task_write), the
-  // span splits at that moment. Portions of a run with no in-progress task stay
-  // unattributed. Bookkeeping writes preserve Task.updatedAt so they cannot change
-  // which task later fallback attribution picks.
+  // auto-compaction, retry backoff — do not count. Every task in progress accrues
+  // the span concurrently; tasks entering or leaving in_progress change only their
+  // own membership. Portions of a run with no in-progress task stay unattributed.
+  // Bookkeeping writes preserve Task.updatedAt so they cannot change which task later
+  // fallback telemetry attribution picks.
   function persistActiveSince(taskId: string, since: number, ctx?: ExtensionContext) {
     updateTaskStats(
       taskId,
@@ -739,41 +740,57 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  function syncAgentActivityTasks(ctx?: ExtensionContext) {
+    if (agentSpanSince === undefined) return;
+
+    const now = Date.now();
+    const inProgressTaskIds = new Set(
+      store
+        .list()
+        .filter((todo) => todo.status === "in_progress")
+        .map((todo) => todo.id),
+    );
+
+    for (const [taskId, since] of agentSpanTaskSince) {
+      if (inProgressTaskIds.has(taskId)) continue;
+      creditActiveMs(taskId, since, now, ctx);
+      agentSpanTaskSince.delete(taskId);
+    }
+
+    for (const taskId of inProgressTaskIds) {
+      if (agentSpanTaskSince.has(taskId)) continue;
+      agentSpanTaskSince.set(taskId, now);
+      persistActiveSince(taskId, now, ctx);
+    }
+  }
+
   function openAgentActivitySpan(ctx: ExtensionContext) {
     prepareStore(ctx);
     if (agentSpanSince !== undefined) return;
     const since = Date.now();
-    const taskId = resolveActiveTaskId();
     agentSpanSince = since;
-    agentSpanTaskId = taskId;
-    if (taskId) persistActiveSince(taskId, since, ctx);
-  }
-
-  function retargetAgentActivitySpan(taskId: string | undefined, ctx?: ExtensionContext) {
-    if (agentSpanSince === undefined || agentSpanTaskId === taskId) return;
-    const now = Date.now();
-    const since = agentSpanSince;
-    const previousTaskId = agentSpanTaskId;
-    agentSpanSince = now;
-    agentSpanTaskId = taskId;
-    if (previousTaskId) creditActiveMs(previousTaskId, since, now, ctx);
-    if (taskId) persistActiveSince(taskId, now, ctx);
+    agentSpanTaskSince.clear();
+    resolveActiveTaskId();
+    for (const todo of store.list()) {
+      if (todo.status !== "in_progress") continue;
+      agentSpanTaskSince.set(todo.id, since);
+      persistActiveSince(todo.id, since, ctx);
+    }
   }
 
   function closeAgentActivitySpan(ctx?: ExtensionContext) {
     if (agentSpanSince === undefined) return;
-    const since = agentSpanSince;
-    const taskId = agentSpanTaskId;
     agentSpanSince = undefined;
-    agentSpanTaskId = undefined;
-    // a trailing portion with no in-progress task stays unattributed
-    if (taskId) creditActiveMs(taskId, since, Date.now(), ctx);
+    const taskSince = agentSpanTaskSince;
+    agentSpanTaskSince = new Map();
+    const now = Date.now();
+    for (const [taskId, since] of taskSince) creditActiveMs(taskId, since, now, ctx);
   }
 
-  // Runs on session_start/session_tree: a persisted activeSince without a matching
-  // agent_end means pi stopped hard mid-run (crash or kill). Dropping it can only
-  // undercount, never inflate. Legacy in-progress tasks get activeMs seeded to 0 so
-  // their runtime stops growing with idle wall-clock time.
+  // Runs on session_start/session_tree: persisted activeSince entries without a
+  // matching agent_end mean pi stopped hard mid-run (crash or kill). Dropping them
+  // can only undercount, never inflate. Legacy in-progress tasks get activeMs seeded
+  // to 0 so their runtime stops growing with idle wall-clock time.
   function reconcileActiveTimeStats() {
     for (const todo of store.list()) {
       const stats = getTaskStats(todo);
@@ -851,7 +868,7 @@ export default function (pi: ExtensionAPI) {
     const active = chooseMostRecentInProgressTask(store.list());
     if (active) activeTaskId = active.id;
     else resolveActiveTaskId();
-    retargetAgentActivitySpan(activeTaskId);
+    syncAgentActivityTasks();
   }
 
   function getTaskWidgetLines(ctx: ExtensionContext, width: number): string[] | undefined {
@@ -968,7 +985,7 @@ export default function (pi: ExtensionAPI) {
     emptyListNudgeShown = false;
     activeTaskId = undefined;
     agentSpanSince = undefined;
-    agentSpanTaskId = undefined;
+    agentSpanTaskSince.clear();
     if (ctx.hasUI) widgetCtx = ctx;
     prepareStore(ctx, options);
     reconcileActiveTimeStats();

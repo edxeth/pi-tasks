@@ -1297,6 +1297,113 @@ describe("pi-tasks extension", () => {
     }
   });
 
+  it("accrues concurrent in-progress tasks from one batch across live renders and persistence", async () => {
+    vi.useFakeTimers();
+    const t0 = new Date("2026-04-15T12:45:00.000Z").getTime();
+    vi.setSystemTime(t0);
+
+    const sessionId = `todo-widget-concurrent-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+
+      await mock.executeTool(
+        "task_write",
+        {
+          operations: [
+            { action: "create", subject: "First", description: "Desc", status: "in_progress" },
+            { action: "create", subject: "Second", description: "Desc", status: "in_progress" },
+          ],
+        },
+        ctx,
+      );
+
+      await mock.fireLifecycle("agent_start", {}, ctx);
+      const rendersAtStart = ctx.widgetRenderCalls.get("tasks") ?? 0;
+      vi.advanceTimersByTime(1_000);
+      expect(ctx.widgetRenderCalls.get("tasks")).toBe(rendersAtStart + 1);
+
+      vi.advanceTimersByTime(9_000);
+      const liveLines = (ctx.widgets.get("tasks") ?? []).join("\n");
+      expect(liveLines).toContain("▶ #1 First · 10s");
+      expect(liveLines).toContain("▶ #2 Second · 10s");
+
+      await mock.fireLifecycle("tool_execution_end", { toolName: "bash", result: {}, isError: false }, ctx);
+      await mock.fireLifecycle("message_end", { message: { role: "assistant", usage: { output: 7 } } }, ctx);
+      await mock.fireLifecycle("agent_end", {}, ctx);
+
+      expect(readTaskFile(storePath, "1").metadata.stats).toMatchObject({
+        activeMs: 10_000,
+        toolUseCount: 1,
+        outputTokens: 7,
+      });
+      expect(readTaskFile(storePath, "2").metadata.stats).toMatchObject({ activeMs: 10_000 });
+      expect(readTaskFile(storePath, "2").metadata.stats.toolUseCount).toBeUndefined();
+      expect(readTaskFile(storePath, "2").metadata.stats.outputTokens).toBeUndefined();
+
+      vi.advanceTimersByTime(30_000);
+      const idleLines = (ctx.widgets.get("tasks") ?? []).join("\n");
+      expect(idleLines).toContain("▶ #1 First · 10s");
+      expect(idleLines).toContain("▶ #2 Second · 10s");
+    } finally {
+      cleanupStore(storePath);
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops only changed tasks in a concurrent span", async () => {
+    vi.useFakeTimers();
+    const t0 = new Date("2026-04-15T12:50:00.000Z").getTime();
+    vi.setSystemTime(t0);
+
+    const sessionId = `todo-span-membership-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    try {
+      const mock = mockPi();
+      const ctx = mockCtx(sessionId, true);
+      initExtension(mock.pi as any);
+      await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
+      await mock.executeTool(
+        "task_write",
+        {
+          operations: [
+            { action: "create", subject: "Complete", description: "Desc", status: "in_progress" },
+            { action: "create", subject: "Pause", description: "Desc", status: "in_progress" },
+            { action: "create", subject: "Delete", description: "Desc", status: "in_progress" },
+            { action: "create", subject: "Survive", description: "Desc", status: "in_progress" },
+          ],
+        },
+        ctx,
+      );
+
+      await mock.fireLifecycle("agent_start", {}, ctx);
+      vi.advanceTimersByTime(4_000);
+      await mock.updateTask({ taskId: "1", status: "completed" }, ctx);
+      await mock.updateTask({ taskId: "2", status: "pending" }, ctx);
+      await mock.updateTask({ taskId: "3", status: "deleted" }, ctx);
+      vi.advanceTimersByTime(6_000);
+      await mock.fireLifecycle("agent_end", {}, ctx);
+
+      expect(readTaskFile(storePath, "1").metadata.stats).toMatchObject({ activeMs: 4_000 });
+      expect(readTaskFile(storePath, "2").metadata.stats).toMatchObject({ activeMs: 4_000 });
+      expect(readTaskFile(storePath, "4").metadata.stats).toMatchObject({ activeMs: 10_000 });
+      expect(readTaskFile(storePath, "1").metadata.stats.activeSince).toBeUndefined();
+      expect(readTaskFile(storePath, "2").metadata.stats.activeSince).toBeUndefined();
+      expect(readTaskFile(storePath, "4").metadata.stats.activeSince).toBeUndefined();
+      expect(existsSync(join(storePath, "3.json"))).toBe(false);
+    } finally {
+      cleanupStore(storePath);
+      vi.useRealTimers();
+    }
+  });
+
   it("updates runtime live and token count after the generation finishes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-15T13:00:00.000Z"));
@@ -1571,7 +1678,7 @@ describe("pi-tasks extension", () => {
     }
   });
 
-  it("closes an open span during session shutdown", async () => {
+  it("closes concurrent open spans during session shutdown", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-15T14:15:00.000Z"));
 
@@ -1584,15 +1691,26 @@ describe("pi-tasks extension", () => {
       const ctx = mockCtx(sessionId);
       initExtension(mock.pi as any);
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
-      await mock.createTask( { subject: "Shutdown", description: "Desc", status: "in_progress" }, ctx);
+      await mock.executeTool(
+        "task_write",
+        {
+          operations: [
+            { action: "create", subject: "Shutdown first", description: "Desc", status: "in_progress" },
+            { action: "create", subject: "Shutdown second", description: "Desc", status: "in_progress" },
+          ],
+        },
+        ctx,
+      );
 
       await mock.fireLifecycle("agent_start", {}, ctx);
       vi.advanceTimersByTime(9_000);
       await mock.fireLifecycle("session_shutdown", {}, ctx);
 
-      const raw = readTaskFile(storePath, "1");
-      expect(raw.metadata.stats.activeMs).toBe(9_000);
-      expect(raw.metadata.stats.activeSince).toBeUndefined();
+      for (const taskId of ["1", "2"]) {
+        const raw = readTaskFile(storePath, taskId);
+        expect(raw.metadata.stats.activeMs).toBe(9_000);
+        expect(raw.metadata.stats.activeSince).toBeUndefined();
+      }
     } finally {
       cleanupStore(storePath);
       vi.useRealTimers();
@@ -1757,16 +1875,20 @@ describe("pi-tasks extension", () => {
         vi.setSystemTime(clock);
       };
 
-      // Independent ledger implementing the documented contract: the active task is
-      // the most recently written in-progress task; each moment accrues to it alone.
+      // Independent ledger implementing the documented contract: every in-progress
+      // task accrues at each moment. The aggregate can exceed wall time during overlap.
       const ledger = new Map<string, number>();
       const inProgressByRecency: string[] = [];
+      const inProgressIds = new Set<string>();
       const pendingIds: string[] = [];
       let windowStart: number | undefined;
-      const activeId = () => inProgressByRecency[inProgressByRecency.length - 1];
+      let maxConcurrent = 0;
+      let overlappedMs = 0;
       const bank = () => {
-        const id = activeId();
-        if (id && windowStart !== undefined) ledger.set(id, (ledger.get(id) ?? 0) + (clock - windowStart));
+        if (windowStart === undefined) return;
+        const elapsed = clock - windowStart;
+        if (inProgressIds.size > 1) overlappedMs += elapsed;
+        for (const id of inProgressIds) ledger.set(id, (ledger.get(id) ?? 0) + elapsed);
       };
       const beginWindow = () => {
         windowStart = clock;
@@ -1779,9 +1901,12 @@ describe("pi-tasks extension", () => {
           const openIndex = inProgressByRecency.indexOf(id);
           if (openIndex >= 0) inProgressByRecency.splice(openIndex, 1);
           inProgressByRecency.push(id);
+          inProgressIds.add(id);
+          maxConcurrent = Math.max(maxConcurrent, inProgressIds.size);
         } else {
           const openIndex = inProgressByRecency.indexOf(id);
           if (openIndex >= 0) inProgressByRecency.splice(openIndex, 1);
+          inProgressIds.delete(id);
         }
         await mock.updateTask( { taskId: id, status }, ctx);
         beginWindow();
@@ -1805,8 +1930,11 @@ describe("pi-tasks extension", () => {
                 : { subject: `T${id}`, description: "Desc" },
               ctx,
             );
-            if (asInProgress) inProgressByRecency.push(id);
-            else pendingIds.push(id);
+            if (asInProgress) {
+              inProgressByRecency.push(id);
+              inProgressIds.add(id);
+              maxConcurrent = Math.max(maxConcurrent, inProgressIds.size);
+            } else pendingIds.push(id);
             beginWindow();
           } else if (choice === 1 && inProgressByRecency.length > 0) {
             await write(inProgressByRecency[inProgressByRecency.length - 1], "completed");
@@ -1828,14 +1956,16 @@ describe("pi-tasks extension", () => {
       }
       const ledgerTotal = [...ledger.values()].reduce((total, ms) => total + ms, 0);
       expect(ledgerTotal).toBeGreaterThan(0);
-      expect(ledgerTotal).toBeLessThan(clock - t0);
+      expect(maxConcurrent).toBeGreaterThan(1);
+      expect(overlappedMs).toBeGreaterThan(0);
+      expect(ledgerTotal).toBeLessThanOrEqual((clock - t0) * maxConcurrent);
     } finally {
       cleanupStore(storePath);
       vi.useRealTimers();
     }
   });
 
-  it("splits active time across tasks as the active task changes mid-run", async () => {
+  it("credits sequential in-progress tasks without charging gaps", async () => {
     vi.useFakeTimers();
     const t0 = new Date("2026-04-15T18:00:00.000Z").getTime();
     vi.setSystemTime(t0);
@@ -1850,7 +1980,7 @@ describe("pi-tasks extension", () => {
       initExtension(mock.pi as any);
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
 
-      // One long run: plan, then work two tasks back to back.
+      // One long run: plan, then work two tasks back to back without overlap.
       await mock.fireLifecycle("agent_start", {}, ctx);
       vi.advanceTimersByTime(10_000);
       await mock.createTask( { subject: "First", description: "Desc", status: "in_progress" }, ctx);
@@ -1882,7 +2012,7 @@ describe("pi-tasks extension", () => {
     }
   });
 
-  it("splits the span on mid-run switches and does not steal task recency from bookkeeping", async () => {
+  it("keeps concurrent timing separate from single-owner telemetry recency", async () => {
     vi.useFakeTimers();
     const t0 = new Date("2026-04-15T16:00:00.000Z").getTime();
     vi.setSystemTime(t0);
@@ -1907,7 +2037,7 @@ describe("pi-tasks extension", () => {
       await mock.fireLifecycle("agent_end", {}, ctx);
 
       const first = readTaskFile(storePath, "1");
-      expect(first.metadata.stats.activeMs).toBe(5_000);
+      expect(first.metadata.stats.activeMs).toBe(10_000);
       expect(first.updatedAt).toBe(t0);
 
       await mock.fireLifecycle("session_start", { reason: "startup" }, ctx);
@@ -1915,7 +2045,7 @@ describe("pi-tasks extension", () => {
       vi.advanceTimersByTime(8_000);
       await mock.fireLifecycle("agent_end", {}, ctx);
 
-      expect(readTaskFile(storePath, "1").metadata.stats.activeMs).toBe(5_000);
+      expect(readTaskFile(storePath, "1").metadata.stats.activeMs).toBe(18_000);
       const second = readTaskFile(storePath, "2");
       expect(second.metadata.stats.activeMs).toBe(13_000);
       expect(second.updatedAt).toBe(t0 + 5_000);
@@ -1975,7 +2105,7 @@ describe("pi-tasks extension", () => {
       vi.advanceTimersByTime(4_000);
       await mock.fireLifecycle("agent_end", {}, ctx);
 
-      expect(readTaskFile(storePath, "1").metadata.stats.activeMs).toBe(5_000);
+      expect(readTaskFile(storePath, "1").metadata.stats.activeMs).toBe(9_000);
       expect(readTaskFile(storePath, "2").metadata.stats.activeMs).toBe(4_000);
     } finally {
       cleanupStore(storePath);
