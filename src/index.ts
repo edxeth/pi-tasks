@@ -1219,8 +1219,9 @@ export default function (pi: ExtensionAPI) {
       content: ["<system-reminder>", TASK_SYSTEM_POLICY, "</system-reminder>"].join("\n"),
       timestamp: Date.now(),
     };
-    // The pinned 0.84.4 types omit "system" from the context-message role union, but older
-    // pi runtimes do deliver leading system messages here; compare through a widened view.
+    // Older pi type contracts omit "system" from the context-message role union even
+    // though those runtimes deliver leading system messages here; compare through a
+    // widened view so the code compiles against both old and new contracts.
     const firstNonSystemIndex = event.messages.findIndex((message) => (message as { role?: string }).role !== "system");
     const insertAt = firstNonSystemIndex === -1 ? event.messages.length : firstNonSystemIndex;
     let tailMessage: { role: "user"; content: string; timestamp: number } | undefined;
