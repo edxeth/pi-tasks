@@ -326,6 +326,18 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Persisted reminder carrier: pi appends a before_agent_start result message to the turn's
+// transcript, where it replays as user-role content on every later request. display:false
+// keeps it out of the UI. Persisting means each request extends the previous request's
+// cache prefix exactly instead of re-writing a tail message that appears once and vanishes.
+function taskReminderMessage(text: string) {
+  return {
+    customType: "task_reminder",
+    content: [{ type: "text" as const, text }],
+    display: false,
+  };
+}
+
 function getAgentDirPath(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
@@ -578,6 +590,7 @@ export default function (pi: ExtensionAPI) {
   let lastTaskToolUseTurn = 0;
   let lastReminderTurn = 0;
   let emptyListNudgeShown = false;
+  let contextUnderPressure = false;
   let widgetView: TaskWidgetView = readPersistedTaskWidgetView();
   let offPending = false;
   // Telemetry remains single-owner; timer membership is tracked separately below.
@@ -979,6 +992,7 @@ export default function (pi: ExtensionAPI) {
     lastTaskToolUseTurn = 0;
     lastReminderTurn = 0;
     emptyListNudgeShown = false;
+    contextUnderPressure = false;
     activeTaskId = undefined;
     agentSpanSince = undefined;
     agentSpanTaskSince.clear();
@@ -1011,6 +1025,26 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (_event, ctx) => {
     prepareStore(ctx);
+    // Reminders ride the prompt result so pi persists them in the conversation history;
+    // context-phase results are request-local and would vanish after one request. The
+    // effective turn number is currentTurn + 1 because this hook fires just before the
+    // turn's turn_start increments the counter.
+    const effectiveTurn = currentTurn + 1;
+    if (!emptyListNudgeShown) {
+      emptyListNudgeShown = true;
+      if (store.list().length === 0) {
+        return { message: taskReminderMessage(EMPTY_LIST_REMINDER) };
+      }
+    }
+    const interval = contextUnderPressure ? REMINDER_INTERVAL_PRESSURE : REMINDER_INTERVAL;
+    if (effectiveTurn - lastTaskToolUseTurn >= interval && effectiveTurn - lastReminderTurn >= interval) {
+      const reminder = getSystemReminder(store);
+      if (reminder) {
+        lastReminderTurn = effectiveTurn;
+        return { message: taskReminderMessage(reminder) };
+      }
+    }
+    return undefined;
   });
 
   pi.on("tool_execution_start", async (_event, ctx) => {
@@ -1224,30 +1258,12 @@ export default function (pi: ExtensionAPI) {
     // widened view so the code compiles against both old and new contracts.
     const firstNonSystemIndex = event.messages.findIndex((message) => (message as { role?: string }).role !== "system");
     const insertAt = firstNonSystemIndex === -1 ? event.messages.length : firstNonSystemIndex;
-    let tailMessage: { role: "user"; content: string; timestamp: number } | undefined;
-    if (!emptyListNudgeShown) {
-      emptyListNudgeShown = true;
-      if (store.list().length === 0) {
-        tailMessage = { role: "user", content: EMPTY_LIST_REMINDER, timestamp: Date.now() };
-      }
-    }
-    if (!tailMessage) {
-      const interval = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS ? REMINDER_INTERVAL_PRESSURE : REMINDER_INTERVAL;
-      if (currentTurn - lastTaskToolUseTurn >= interval && currentTurn - lastReminderTurn >= interval) {
-        const reminder = getSystemReminder(store);
-        if (reminder) {
-          lastReminderTurn = currentTurn;
-          tailMessage = { role: "user", content: reminder, timestamp: Date.now() };
-        }
-      }
-    }
+    // Arm the pressure signal for the next prompt's reminder gating: only the context
+    // phase sees the live request size, while reminder delivery happens at
+    // before_agent_start, before this request exists.
+    contextUnderPressure = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS;
     return {
-      messages: [
-        ...event.messages.slice(0, insertAt),
-        policyMessage,
-        ...event.messages.slice(insertAt),
-        ...(tailMessage ? [tailMessage] : []),
-      ],
+      messages: [...event.messages.slice(0, insertAt), policyMessage, ...event.messages.slice(insertAt)],
     };
   });
 
