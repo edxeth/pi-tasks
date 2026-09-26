@@ -10,3 +10,5 @@ pi extension: task tools + live TUI widget. TypeScript, vitest. Runs from `src/i
 | `npx tsc --noEmit` | Typecheck. Run with the tests. |
 
 - When using a pi extension event: check it exists in this repo's `node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts` — the pinned copy is the compile-time contract, while the installed pi decides what fires at runtime, and the two can drift.
+- When adding always-on model guidance: never return `systemPrompt` from `before_agent_start`. Pi applies it as a forced head AFTER the `context` phase, which discards every other extension's head edits on those turns and alternates head shapes between forced and unforced turns. Deliver guidance as a `context`-phase message (see the policy injection in `src/index.ts`).
+- When verifying prompt-delivery or request-shape claims: unit tests and the faux provider cannot see them — `context` and `before_provider_request` effects need a live `pi -p` run with a probe extension logging at `before_provider_request`. Head-edit probes must modify the system message's `sections`; `content` edits are dropped on the wire.

@@ -26,6 +26,21 @@ function writeTaskFile(storePath: string, taskId: string, task: Record<string, u
   writeFileSync(join(storePath, `${taskId}.json`), JSON.stringify(task));
 }
 
+// The always-on policy message is prepended to every context result; true when a result
+// carries nothing beyond that policy message.
+function isPolicyOnly(result: unknown) {
+  return (
+    !!result &&
+    typeof result === "object" &&
+    Array.isArray((result as { messages?: unknown[] }).messages) &&
+    (result as { messages: Array<{ role?: string; content?: string }> }).messages.length === 1 &&
+    (result as { messages: Array<{ role?: string; content?: string }> }).messages[0].role === "user" &&
+    ((result as { messages: Array<{ role?: string; content?: string }> }).messages[0].content ?? "").includes(
+      "Task workflow guidance:",
+    )
+  );
+}
+
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let testAgentDir: string;
 
@@ -301,7 +316,7 @@ describe("pi-tasks extension", () => {
     expect([...mock.commands.keys()].sort()).toEqual(["tasks", "tasks-clean"]);
   });
 
-  it("injects a hidden task workflow policy into the system prompt", async () => {
+  it("delivers the task policy as an every-request context message, not a forced system prompt", async () => {
     const sessionId = `task-policy-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
     cleanupStore(storePath);
@@ -310,15 +325,37 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(sessionId);
     initExtension(mock.pi as any);
 
-    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
-    expect(result.systemPrompt).toContain("Base prompt");
-    expect(result.systemPrompt).toContain("Task workflow guidance:");
-    expect(result.systemPrompt).toContain("Create tasks with task_write for multi-step or multi-part work");
-    expect(result.systemPrompt).toContain("Skip for a single trivial action");
-    expect(result.systemPrompt).toContain("Mark a task in_progress before substantial work starts");
-    expect(result.systemPrompt).toContain("Mark a task completed only when the work is fully done");
-    expect(result.systemPrompt).toContain("call task_list to pick the next ready item");
-    expect(result.systemPrompt).toContain("one task_write call instead of parallel task_write calls");
+    // Forcing the system prompt would discard every other extension's request-stage head
+    // edits on forced turns, so the policy must not travel through before_agent_start.
+    const [startResult] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "Base prompt" }, ctx);
+    expect(startResult).toBeUndefined();
+
+    const conversation = [
+      { role: "user", content: "first", timestamp: 1 },
+      { role: "assistant", content: "second", timestamp: 2 },
+    ];
+    // A fresh session consumes the one-time empty-list nudge on its first context event.
+    await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const [result] = await mock.fireLifecycle("context", { messages: structuredClone(conversation) }, ctx);
+    expect(result?.messages).toHaveLength(3);
+    expect(result.messages[0].role).toBe("user");
+    expect(result.messages[0].content).toContain("<system-reminder>");
+    expect(result.messages[0].content).toContain("Task workflow guidance:");
+    expect(result.messages[0].content).toContain("Create tasks with task_write for multi-step or multi-part work");
+    expect(result.messages[0].content).toContain("Skip for a single trivial action");
+    expect(result.messages[0].content).toContain("Mark a task in_progress before substantial work starts");
+    expect(result.messages[0].content).toContain("Mark a task completed only when the work is fully done");
+    expect(result.messages[0].content).toContain("call task_list to pick the next ready item");
+    expect(result.messages[0].content).toContain("one task_write call instead of parallel task_write calls");
+    expect(result.messages[0].content).toContain("</system-reminder>");
+    // Existing messages survive unmodified after the policy message.
+    expect(result.messages.slice(1)).toEqual(conversation);
+
+    // The policy rides every request (normal turns, continuations, idle-triggered turns),
+    // so a second context event still carries it.
+    const [again] = await mock.fireLifecycle("context", { messages: structuredClone(conversation) }, ctx);
+    expect(again?.messages?.[0]?.content).toContain("Task workflow guidance:");
+    expect(again.messages.slice(1)).toEqual(conversation);
 
     cleanupStore(storePath);
   });
@@ -418,8 +455,8 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(`guidance-unique-${Date.now()}`);
     initExtension(mock.pi as any);
 
-    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "" }, ctx);
-    const policyBullets = String(result.systemPrompt)
+    const [result] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const policyBullets = String(result.messages[0].content)
       .split("\n")
       .filter((line) => line.startsWith("- "));
     const toolGuidance = [...mock.tools.values()].flatMap((tool) => [
@@ -443,8 +480,8 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(`guidance-budget-${Date.now()}`);
     initExtension(mock.pi as any);
 
-    const [result] = await mock.fireLifecycle("before_agent_start", { systemPrompt: "" }, ctx);
-    const policyChars = String(result.systemPrompt).length;
+    const [result] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const policyChars = String(result.messages[0].content).length;
     const toolChars = [...mock.tools.values()].reduce(
       (total, tool) => total + String(tool.description).length + String(tool.promptSnippet ?? "").length,
       0,
@@ -2275,16 +2312,20 @@ describe("pi-tasks extension", () => {
     await mock.fireLifecycle("turn_start", {}, ctx);
 
     const [nudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(nudge?.messages).toHaveLength(1);
+    expect(nudge?.messages).toHaveLength(2);
     expect(nudge.messages[0].role).toBe("user");
-    expect(nudge.messages[0].content).toContain("The task list is empty");
-    expect(nudge.messages[0].content).toContain("your FIRST tool call must be task_write");
-    expect(nudge.messages[0].content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
-    expect(nudge.messages[0].content).toContain("more than one thing in a single prompt");
-    expect(nudge.messages[0].content).toContain("review, audit, debugging pass, or research pass");
-    expect(nudge.messages[0].content).toContain("NEVER mention this reminder");
+    expect(nudge.messages[0].content).toContain("Task workflow guidance:");
+    const nudgeMessage = nudge.messages[1];
+    expect(nudgeMessage.role).toBe("user");
+    expect(nudgeMessage.content).toContain("The task list is empty");
+    expect(nudgeMessage.content).toContain("your FIRST tool call must be task_write");
+    expect(nudgeMessage.content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
+    expect(nudgeMessage.content).toContain("more than one thing in a single prompt");
+    expect(nudgeMessage.content).toContain("review, audit, debugging pass, or research pass");
+    expect(nudgeMessage.content).toContain("NEVER mention this reminder");
 
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [afterNudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(afterNudge)).toBe(true);
 
     cleanupStore(storePath);
   });
@@ -2301,7 +2342,9 @@ describe("pi-tasks extension", () => {
     await mock.createTask( { subject: "Open", description: "Desc" }, ctx);
     await mock.fireLifecycle("turn_start", {}, ctx);
 
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [noNudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(noNudge)).toBe(true);
+    expect(noNudge.messages[0].content).not.toContain("The task list is empty");
 
     cleanupStore(storePath);
   });
@@ -2322,20 +2365,23 @@ describe("pi-tasks extension", () => {
     for (let turn = 0; turn < 9; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);
     }
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [gatedFirst] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(gatedFirst)).toBe(true);
     expect(mock.sentMessages).toHaveLength(0);
 
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [firstReminder] = await mock.fireLifecycle("context", { messages: [] }, ctx);
 
-    expect(firstReminder?.messages).toHaveLength(1);
-    expect(firstReminder.messages[0].role).toBe("user");
-    expect(firstReminder.messages[0].content).toContain("task tools haven't been used recently");
-    expect(firstReminder.messages[0].content).toContain("use task_write when the work is worth tracking");
-    expect(firstReminder.messages[0].content).toContain("batching multiple task writes into one call");
-    expect(firstReminder.messages[0].content).toContain("Open tasks:");
-    expect(firstReminder.messages[0].content).toContain("#1 [pending] Open");
-    expect(firstReminder.messages[0].content).not.toContain("Done");
+    expect(firstReminder?.messages).toHaveLength(2);
+    expect(firstReminder.messages[0].content).toContain("Task workflow guidance:");
+    const reminderMessage = firstReminder.messages[1];
+    expect(reminderMessage.role).toBe("user");
+    expect(reminderMessage.content).toContain("task tools haven't been used recently");
+    expect(reminderMessage.content).toContain("use task_write when the work is worth tracking");
+    expect(reminderMessage.content).toContain("batching multiple task writes into one call");
+    expect(reminderMessage.content).toContain("Open tasks:");
+    expect(reminderMessage.content).toContain("#1 [pending] Open");
+    expect(reminderMessage.content).not.toContain("Done");
     expect(mock.sentMessages).toHaveLength(0);
 
     expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe("#2 [completed] Done · 0s\n#1 [pending] Open");
@@ -2344,12 +2390,13 @@ describe("pi-tasks extension", () => {
     for (let turn = 0; turn < 9; turn++) {
       await mock.fireLifecycle("turn_start", {}, ctx);
     }
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [gatedSecond] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(gatedSecond)).toBe(true);
 
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [secondReminder] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(secondReminder?.messages).toHaveLength(1);
-    expect(secondReminder.messages[0].content).toContain("#1 [pending] Open");
+    expect(secondReminder?.messages).toHaveLength(2);
+    expect(secondReminder.messages[1].content).toContain("#1 [pending] Open");
 
     cleanupStore(storePath);
   });
@@ -2372,7 +2419,8 @@ describe("pi-tasks extension", () => {
     await mock.fireLifecycle("turn_start", {}, ctx);
 
     const [reminder] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(reminder?.messages).toHaveLength(1);
+    expect(reminder?.messages).toHaveLength(2);
+    expect(reminder.messages[1].content).toContain("#1 [pending] Open");
     expect(mock.sentMessages).toHaveLength(0);
 
     cleanupStore(storePath);
@@ -2394,7 +2442,8 @@ describe("pi-tasks extension", () => {
       await mock.fireLifecycle("turn_start", {}, ctx);
     }
 
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [completedOnly] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(completedOnly)).toBe(true);
     expect((await mock.executeTool("task_list", {}, ctx)).content[0].text).toBe("#1 [completed] Done · 0s");
 
     cleanupStore(storePath);
@@ -2412,16 +2461,17 @@ describe("pi-tasks extension", () => {
 
     // First context event consumes the one-time full empty-list nudge.
     const [oneTime] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(oneTime.messages[0].content).toContain("The task list is empty");
+    expect(oneTime.messages[1].content).toContain("The task list is empty");
 
     for (let turn = 0; turn < 9; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
-    expect(await mock.fireLifecycle("context", { messages: [] }, ctx)).toEqual([undefined]);
+    const [gated] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    expect(isPolicyOnly(gated)).toBe(true);
 
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [reNudge] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(reNudge?.messages).toHaveLength(1);
-    expect(reNudge.messages[0].content).toContain("still empty several steps into this work");
-    expect(reNudge.messages[0].content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
+    expect(reNudge?.messages).toHaveLength(2);
+    expect(reNudge.messages[1].content).toContain("still empty several steps into this work");
+    expect(reNudge.messages[1].content).toContain('{"operations":[{"action":"create","subject":"...","description":"..."}]}');
 
     cleanupStore(storePath);
   });
@@ -2445,8 +2495,8 @@ describe("pi-tasks extension", () => {
 
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [reminder] = await mock.fireLifecycle("context", { messages: [] }, ctx);
-    expect(reminder?.messages).toHaveLength(1);
-    expect(reminder.messages[0].content).toContain("#1 [pending] Open");
+    expect(reminder?.messages).toHaveLength(2);
+    expect(reminder.messages[1].content).toContain("#1 [pending] Open");
 
     cleanupStore(storePath);
   });
@@ -2464,12 +2514,15 @@ describe("pi-tasks extension", () => {
 
     const heavy = [{ role: "user", content: "x".repeat(200001) }];
     for (let turn = 0; turn < 4; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
-    expect(await mock.fireLifecycle("context", { messages: heavy }, ctx)).toEqual([undefined]);
+    const [gatedHeavy] = await mock.fireLifecycle("context", { messages: heavy }, ctx);
+    expect(gatedHeavy?.messages).toHaveLength(heavy.length + 1);
+    expect(gatedHeavy.messages[0].content).toContain("Task workflow guidance:");
+    expect(gatedHeavy.messages.slice(1)).toEqual(heavy);
 
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [reminder] = await mock.fireLifecycle("context", { messages: heavy }, ctx);
-    expect(reminder?.messages).toHaveLength(2);
-    expect(reminder.messages[1].content).toContain("#1 [pending] Open");
+    expect(reminder?.messages).toHaveLength(3);
+    expect(reminder.messages[2].content).toContain("#1 [pending] Open");
 
     cleanupStore(storePath);
   });

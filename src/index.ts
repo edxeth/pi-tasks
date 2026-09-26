@@ -142,7 +142,7 @@ type TaskBatchOperation =
     };
 
 // One home per rule (PRD-0001 / ADR-0001): this policy block owns lifecycle rules and is
-// the only always-on system-prompt text; tool descriptions own per-tool contract facts and
+// the only always-on policy text; tool descriptions own per-tool contract facts and
 // cross-tool routing. Do not restate a rule in more than one channel.
 const TASK_SYSTEM_POLICY = [
   "Task workflow guidance:",
@@ -320,10 +320,6 @@ function getAllWidgetRank(todo: Task, now = Date.now()): number {
   if (todo.status === "pending") return 1;
   if (isRecentlyCompleted(todo, now)) return 2;
   return 3;
-}
-
-function appendSystemPrompt(base: string | undefined, extra: string): string {
-  return base ? `${base.trimEnd()}\n\n${extra}` : extra;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -1013,11 +1009,8 @@ export default function (pi: ExtensionAPI) {
     closeAgentActivitySpan(ctx);
   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", async (_event, ctx) => {
     prepareStore(ctx);
-    return {
-      systemPrompt: appendSystemPrompt((event as { systemPrompt?: string }).systemPrompt, TASK_SYSTEM_POLICY),
-    };
   });
 
   pi.on("tool_execution_start", async (_event, ctx) => {
@@ -1211,22 +1204,36 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("context", async (event) => {
+    // The policy must reach the model on every provider request without owning the request
+    // head. A before_agent_start-returned systemPrompt is applied by pi as a forced head
+    // AFTER the context phase, which discards every other extension's head edits on forced
+    // turns and alternates head shapes (flat forced text vs sectioned) between forced and
+    // unforced turns. Injecting here keeps the head untouched and rides every request:
+    // normal turns, tool continuations, and idle-triggered turns.
+    const policyMessage = {
+      role: "user" as const,
+      content: ["<system-reminder>", TASK_SYSTEM_POLICY, "</system-reminder>"].join("\n"),
+      timestamp: Date.now(),
+    };
+    let tailMessage: { role: "user"; content: string; timestamp: number } | undefined;
     if (!emptyListNudgeShown) {
       emptyListNudgeShown = true;
       if (store.list().length === 0) {
-        return {
-          messages: [...event.messages, { role: "user", content: EMPTY_LIST_REMINDER, timestamp: Date.now() }],
-        };
+        tailMessage = { role: "user", content: EMPTY_LIST_REMINDER, timestamp: Date.now() };
       }
     }
-    const interval = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS ? REMINDER_INTERVAL_PRESSURE : REMINDER_INTERVAL;
-    if (currentTurn - lastTaskToolUseTurn < interval) return undefined;
-    if (currentTurn - lastReminderTurn < interval) return undefined;
-    const reminder = getSystemReminder(store);
-    if (!reminder) return undefined;
-    lastReminderTurn = currentTurn;
+    if (!tailMessage) {
+      const interval = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS ? REMINDER_INTERVAL_PRESSURE : REMINDER_INTERVAL;
+      if (currentTurn - lastTaskToolUseTurn >= interval && currentTurn - lastReminderTurn >= interval) {
+        const reminder = getSystemReminder(store);
+        if (reminder) {
+          lastReminderTurn = currentTurn;
+          tailMessage = { role: "user", content: reminder, timestamp: Date.now() };
+        }
+      }
+    }
     return {
-      messages: [...event.messages, { role: "user", content: reminder, timestamp: Date.now() }],
+      messages: [policyMessage, ...event.messages, ...(tailMessage ? [tailMessage] : [])],
     };
   });
 
