@@ -360,6 +360,34 @@ describe("pi-tasks extension", () => {
     cleanupStore(storePath);
   });
 
+  it("keeps a visible leading system message first when inserting the policy", async () => {
+    const sessionId = `task-policy-head-${Date.now()}`;
+    const storePath = getSessionTaskDirPath(sessionId);
+    cleanupStore(storePath);
+
+    const mock = mockPi();
+    const ctx = mockCtx(sessionId);
+    initExtension(mock.pi as any);
+    await mock.fireLifecycle("before_agent_start", {}, ctx);
+
+    // Some pi versions hand context handlers the leading system message; providers read
+    // the prompt and initial tools from messages[0] there, so it must stay first.
+    const withHead = [
+      { role: "system", content: "system head", timestamp: 1 },
+      { role: "user", content: "hello", timestamp: 2 },
+    ];
+    // A fresh session consumes the one-time empty-list nudge on its first context event.
+    await mock.fireLifecycle("context", { messages: structuredClone(withHead) }, ctx);
+    const [result] = await mock.fireLifecycle("context", { messages: structuredClone(withHead) }, ctx);
+    expect(result?.messages).toHaveLength(3);
+    expect(result.messages[0]).toEqual(withHead[0]);
+    expect(result.messages[1].role).toBe("user");
+    expect(result.messages[1].content).toContain("Task workflow guidance:");
+    expect(result.messages[2]).toEqual(withHead[1]);
+
+    cleanupStore(storePath);
+  });
+
   it("creates per-task session-scoped files under ~/.pi/tasks", async () => {
     const sessionId = `todo-tools-${Date.now()}`;
     const storePath = getSessionTaskDirPath(sessionId);
