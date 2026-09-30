@@ -334,9 +334,7 @@ describe("pi-tasks extension", () => {
       { role: "user", content: "first", timestamp: 1 },
       { role: "assistant", content: "second", timestamp: 2 },
     ];
-    // A fresh session consumes the one-time empty-list nudge on its first context event.
-    await mock.fireLifecycle("context", { messages: [] }, ctx);
-    const [result] = await mock.fireLifecycle("context", { messages: structuredClone(conversation) }, ctx);
+    const [result] = await mock.fireLifecycle("context_with_system", { messages: structuredClone(conversation) }, ctx);
     expect(result?.messages).toHaveLength(3);
     expect(result.messages[0].role).toBe("user");
     expect(result.messages[0].content).toContain("<system-reminder>");
@@ -353,7 +351,7 @@ describe("pi-tasks extension", () => {
 
     // The policy rides every request (normal turns, continuations, idle-triggered turns),
     // so a second context event still carries it.
-    const [again] = await mock.fireLifecycle("context", { messages: structuredClone(conversation) }, ctx);
+    const [again] = await mock.fireLifecycle("context_with_system", { messages: structuredClone(conversation) }, ctx);
     expect(again?.messages?.[0]?.content).toContain("Task workflow guidance:");
     expect(again.messages.slice(1)).toEqual(conversation);
 
@@ -370,15 +368,12 @@ describe("pi-tasks extension", () => {
     initExtension(mock.pi as any);
     await mock.fireLifecycle("before_agent_start", {}, ctx);
 
-    // Some pi versions hand context handlers the leading system message; providers read
-    // the prompt and initial tools from messages[0] there, so it must stay first.
+    // Providers read the prompt and initial tools from messages[0], so it must stay first.
     const withHead = [
       { role: "system", content: "system head", timestamp: 1 },
       { role: "user", content: "hello", timestamp: 2 },
     ];
-    // A fresh session consumes the one-time empty-list nudge on its first context event.
-    await mock.fireLifecycle("context", { messages: structuredClone(withHead) }, ctx);
-    const [result] = await mock.fireLifecycle("context", { messages: structuredClone(withHead) }, ctx);
+    const [result] = await mock.fireLifecycle("context_with_system", { messages: structuredClone(withHead) }, ctx);
     expect(result?.messages).toHaveLength(3);
     expect(result.messages[0]).toEqual(withHead[0]);
     expect(result.messages[1].role).toBe("user");
@@ -483,7 +478,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(`guidance-unique-${Date.now()}`);
     initExtension(mock.pi as any);
 
-    const [result] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const [result] = await mock.fireLifecycle("context_with_system", { messages: [] }, ctx);
     const policyBullets = String(result.messages[0].content)
       .split("\n")
       .filter((line) => line.startsWith("- "));
@@ -508,7 +503,7 @@ describe("pi-tasks extension", () => {
     const ctx = mockCtx(`guidance-budget-${Date.now()}`);
     initExtension(mock.pi as any);
 
-    const [result] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const [result] = await mock.fireLifecycle("context_with_system", { messages: [] }, ctx);
     const policyChars = String(result.messages[0].content).length;
     const toolChars = [...mock.tools.values()].reduce(
       (total, tool) => total + String(tool.description).length + String(tool.promptSnippet ?? "").length,
@@ -2349,12 +2344,12 @@ describe("pi-tasks extension", () => {
     expect(nudgeText).toContain("NEVER mention this reminder");
     expect(mock.sentMessages).toHaveLength(0);
 
-    // One-time: the next prompt carries no second nudge, and the context phase stays
+    // One-time: the next prompt carries no second nudge, and the request-stage injection stays
     // policy-only because reminders no longer ride requests.
     await mock.fireLifecycle("turn_start", {}, ctx);
     const [second] = await mock.fireLifecycle("before_agent_start", {}, ctx);
     expect(second?.message).toBeUndefined();
-    const [policy] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const [policy] = await mock.fireLifecycle("context_with_system", { messages: [] }, ctx);
     expect(isPolicyOnly(policy)).toBe(true);
 
     cleanupStore(storePath);
@@ -2373,7 +2368,7 @@ describe("pi-tasks extension", () => {
     const [noNudge] = await mock.fireLifecycle("before_agent_start", {}, ctx);
     expect(noNudge?.message).toBeUndefined();
 
-    const [policy] = await mock.fireLifecycle("context", { messages: [] }, ctx);
+    const [policy] = await mock.fireLifecycle("context_with_system", { messages: [] }, ctx);
     expect(isPolicyOnly(policy)).toBe(true);
     expect(policy.messages[0].content).not.toContain("The task list is empty");
 
@@ -2539,9 +2534,8 @@ describe("pi-tasks extension", () => {
     const heavy = [{ role: "user", content: "x".repeat(200001) }];
     // The context phase arms the pressure signal for the next prompt's reminder gating.
     const [armed] = await mock.fireLifecycle("context", { messages: heavy }, ctx);
-    expect(armed?.messages).toHaveLength(heavy.length + 1);
-    expect(armed.messages[0].content).toContain("Task workflow guidance:");
-    expect(armed.messages.slice(1)).toEqual(heavy);
+    expect(armed).toBeUndefined();
+    expect(heavy).toEqual([{ role: "user", content: "x".repeat(200001) }]);
 
     for (let turn = 0; turn < 3; turn++) await mock.fireLifecycle("turn_start", {}, ctx);
     const [gated] = await mock.fireLifecycle("before_agent_start", {}, ctx);

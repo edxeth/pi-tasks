@@ -1238,32 +1238,31 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("context", async (event) => {
-    // The policy must reach the model on every provider request without owning the request
-    // head. A before_agent_start-returned systemPrompt is applied by pi as a forced head
-    // AFTER the context phase, which discards every other extension's head edits on forced
-    // turns and alternates head shapes (flat forced text vs sectioned) between forced and
-    // unforced turns. Injecting here keeps the head untouched and rides every request:
-    // normal turns, tool continuations, and idle-triggered turns.
-    // Placement: right after any leading system-role messages. Some pi versions hand
-    // `context` handlers the leading system message (providers read the prompt and initial
-    // tools from messages[0] there); others filter it out and restore it afterward. The
-    // first non-system index lands the policy adjacent to the head on both shapes.
+    // Measure conversation pressure without changing the list. Pi merges all system
+    // updates into the historical head when a context handler returns changed messages.
+    contextUnderPressure = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS;
+  });
+
+  pi.on("context_with_system", async (event) => {
+    // This phase preserves system updates in place. Inserting through context instead
+    // would move later instructions ahead of signed thinking and invalidate its prefix.
+    // Keep the policy byte-stable and adjacent to the initial head on every request,
+    // including tool continuations and idle-triggered runs; never force a system prompt.
+    // A skill can be persisted before the first system entry. Providers require that
+    // initial declaration at index zero; relocate only it, never fold in later updates.
+    const headIndex = event.messages.findIndex((message) => message.role === "system");
+    const messages = headIndex > 0
+      ? [event.messages[headIndex], ...event.messages.slice(0, headIndex), ...event.messages.slice(headIndex + 1)]
+      : event.messages;
     const policyMessage = {
       role: "user" as const,
       content: ["<system-reminder>", TASK_SYSTEM_POLICY, "</system-reminder>"].join("\n"),
       timestamp: Date.now(),
     };
-    // Older pi type contracts omit "system" from the context-message role union even
-    // though those runtimes deliver leading system messages here; compare through a
-    // widened view so the code compiles against both old and new contracts.
-    const firstNonSystemIndex = event.messages.findIndex((message) => (message as { role?: string }).role !== "system");
-    const insertAt = firstNonSystemIndex === -1 ? event.messages.length : firstNonSystemIndex;
-    // Arm the pressure signal for the next prompt's reminder gating: only the context
-    // phase sees the live request size, while reminder delivery happens at
-    // before_agent_start, before this request exists.
-    contextUnderPressure = estimateContextChars(event.messages) > CONTEXT_PRESSURE_CHARS;
+    const firstNonSystemIndex = messages.findIndex((message) => message.role !== "system");
+    const insertAt = firstNonSystemIndex === -1 ? messages.length : firstNonSystemIndex;
     return {
-      messages: [...event.messages.slice(0, insertAt), policyMessage, ...event.messages.slice(insertAt)],
+      messages: [...messages.slice(0, insertAt), policyMessage, ...messages.slice(insertAt)],
     };
   });
 

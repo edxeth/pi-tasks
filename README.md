@@ -43,6 +43,8 @@ https://github.com/user-attachments/assets/f0229862-417b-4ef2-9486-2b8736b7ce87
 
 ## Install
 
+Requires Pi (`@earendil-works/pi-coding-agent`) 0.87.1 or newer.
+
 ```bash
 pi install git:github.com/edxeth/pi-tasks
 ```
@@ -85,6 +87,8 @@ When you fork a session, the child gets a copy of the parent task state. When yo
 Open work is kept separate from completed work. Blockers are tracked bidirectionally. Warnings are surfaced for cycles, self-dependencies, and dangling references. Completed tasks stay on disk until you delete them or clear them.
 
 After 10 turns of not using the task tools, `pi-tasks` injects a hidden reminder into context. It is read-only. It lists open tasks only. It does not spam the visible transcript.
+
+The task policy is included on every model request without merging later system instructions into the original prompt. Persisted reminders remain in subsequent requests. This preserves historical prefixes for models that support system updates within a conversation; it cannot prevent another extension or a provider from rewriting them.
 
 Task stats are stored in `metadata.stats` and updated from real execution: start time, completion time, agent-active runtime, tool count, last tool, and output tokens. That token accounting also includes subagent output from [`pi-subagents`](https://github.com/edxeth/pi-subagents), so child-agent output is counted back into the parent task.
 
